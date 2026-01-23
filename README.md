@@ -150,34 +150,89 @@ This implementation is based on extensive research of the following specificatio
 
 Based on the official sFlow specification:
 
+```c
+struct sample_datagram_v5 {
+   address agent_address;        // IP address of sampling agent
+   unsigned int sub_agent_id;    // Distinguishes datagram streams
+   unsigned int sequence_number; // Incremented with each datagram
+   unsigned int uptime;          // Milliseconds since boot
+   sample_record samples<>;      // Variable-length array of samples
+};
+
+struct sample_record {
+   data_format sample_type;      // 4 bytes: enterprise << 12 | format
+   opaque sample_data<>;         // Variable-length opaque data (XDR)
+};
 ```
-sample_datagram_v5 {
-   address agent_address      // IP of sampling agent
-   unsigned int sub_agent_id  // Distinguishes streams
-   unsigned int sequence_num  // Increments per datagram
-   unsigned int uptime        // ms since boot
-   sample_record samples<>    // Variable-length array
-}
+
+### Extended Gateway Record (Type 1003)
+
+The core structure modified by this enricher:
+
+```c
+struct extended_gateway {
+   address nexthop;              // Next hop router address
+   unsigned int as;              // Router's own AS
+   unsigned int src_as;          // Source AS from routing  ◄── SrcAS enrichment
+   unsigned int src_peer_as;     // Source peer AS
+   as_path_type dst_as_path<>;   // AS path to destination  ◄── DstAS enrichment
+   unsigned int communities<>;   // BGP communities
+   unsigned int localpref;       // Local preference
+};
+
+struct as_path_type {
+   as_path_segment_type type;    // AS_SET=1, AS_SEQUENCE=2
+   unsigned int as_number<>;     // Array of AS numbers
+};
 ```
 
 ### XDR Encoding (RFC 4506)
 
 The enricher strictly follows XDR encoding rules:
 
-- **4-byte alignment**: All data elements aligned to 32-bit boundaries
-- **Big-endian**: Network byte order for all multi-byte values
-- **Variable-length opaque**: Length prefix (4 bytes) + data + padding (0-3 bytes)
+| Principle | Description |
+|-----------|-------------|
+| **4-byte alignment** | All data elements aligned to 32-bit boundaries |
+| **Big-endian** | Network byte order for all multi-byte values |
+| **Variable-length opaque** | Length prefix (4 bytes) + data + padding (0-3 bytes) |
 
-### Extended Gateway Record Modification
+**Variable-Length Opaque Data Encoding:**
 
-For **SrcAS enrichment** (outbound traffic):
+```
++--------+--------+--------+--------+
+|    length n (4 bytes, unsigned)   |
++--------+--------+--------+--------+
+|     byte 0     |     byte 1       |
++--------+--------+--------+--------+
+|       ...      |     byte n-1     |
++--------+--------+--------+--------+
+|    padding (0-3 bytes of zeros)   |
++--------+--------+--------+--------+
+```
+
+### Enrichment Implementation
+
+**SrcAS enrichment** (outbound traffic):
 - Modification is **in-place** (no packet resize)
 - SrcAS field at fixed offset within Extended Gateway record
+- Simply overwrites 4 bytes when `SrcAS=0` and source IP matches rule
 
-For **DstAS enrichment** (inbound traffic):
+**DstAS enrichment** (inbound traffic):
 - Requires **packet resize** (+12 bytes per enriched sample)
-- Inserts AS_SEQUENCE segment: `[type=2][length=1][ASN]`
-- Updates record length, sample length fields
+- Inserts AS_SEQUENCE segment with the following structure:
+
+```
+DstAS Insertion: 12 bytes total (XDR-compliant)
+┌────────────────┬────────────────┬────────────────┐
+│  Segment Type  │ Segment Length │   ASN Value    │
+│   (4 bytes)    │   (4 bytes)    │   (4 bytes)    │
+│  AS_SEQUENCE=2 │      1         │    202032      │
+└────────────────┴────────────────┴────────────────┘
+```
+
+- Updates `DstASPathLen`: 0 → 1
+- Updates `record_length`: +12 bytes
+- Updates `sample_length`: +12 bytes
 - **Critical**: Samples processed in reverse order to maintain offset integrity
 
 ### Multi-Sample Handling
@@ -187,16 +242,32 @@ sFlow datagrams can contain multiple samples. When inserting bytes for DstAS:
 ```
 Problem: Forward processing corrupts subsequent offsets
 
-Sample[0] @ offset 100  ──► Insert 12 bytes ──► Sample[1] offset invalid!
-Sample[1] @ offset 300  (calculated from original packet)
+┌─────────┐     ┌─────────┐     ┌─────────┐
+│Sample[0]│     │Sample[1]│     │Sample[2]│
+│@off 100 │     │@off 300 │     │@off 500 │
+└─────────┘     └─────────┘     └─────────┘
+
+After inserting 12 bytes at Sample[0]:
+- Sample[1] stored offset (300) → INVALID! (now at 312)
+- Sample[2] stored offset (500) → INVALID! (now at 512)
 
 Solution: Reverse-order processing
 
-Process Sample[N] first   ──► Insert 12 bytes ──► Sample[0..N-1] offsets valid
-Process Sample[N-1] next  ──► Insert 12 bytes ──► Sample[0..N-2] offsets valid
-...
-Process Sample[0] last    ──► Complete
+Process Sample[2] first (offset 500):
+  → Insert 12 bytes at 500
+  → Sample[0] offset 100 ✓ VALID (100 < 500)
+  → Sample[1] offset 300 ✓ VALID (300 < 500)
+
+Process Sample[1] next (offset 300):
+  → Insert 12 bytes at 300
+  → Sample[0] offset 100 ✓ VALID (100 < 300)
+
+Process Sample[0] last (offset 100):
+  → Insert 12 bytes at 100
+  → COMPLETE ✓
 ```
+
+This approach guarantees mathematical correctness with zero additional overhead
 
 ---
 
@@ -439,22 +510,28 @@ sflow-enricher/
 
 ---
 
-## Author
-
-**Paolo Caparrelli**
-GOLINE SA
-soc@goline.ch
-
----
-
-## License
-
-MIT License - GOLINE SA - 2026
-
----
+<br/>
 
 <p align="center">
-  <img src="github/assets/goline-logo.png" alt="GOLINE SA" height="50"/>
+  <img src="github/assets/goline-logo.png" alt="GOLINE SA" height="60"/>
+</p>
+
+<p align="center">
+  <strong>Developed by GOLINE SA</strong><br/>
+  Swiss Network & Security Solutions
+</p>
+
+<p align="center">
+  <a href="mailto:soc@goline.ch">soc@goline.ch</a>
+</p>
+
+<p align="center">
+  <strong>Author:</strong> Paolo Caparrelli<br/>
+  <strong>Co-Author:</strong> Claude Opus 4.5 (Anthropic)
+</p>
+
+<p align="center">
+  <sub>MIT License - GOLINE SA - 2026</sub>
 </p>
 
 <p align="center">
