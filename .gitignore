@@ -1,5 +1,5 @@
-# Binaries
-sflow-enricher
+# Binaries (at root only)
+/sflow-enricher
 *.exe
 *.dll
 *.so
