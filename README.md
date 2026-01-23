@@ -24,42 +24,53 @@ Proxy sFlow ad alte prestazioni che arricchisce i pacchetti con informazioni ASN
 
 ## Panoramica
 
-**sFlow Enricher** è un proxy sFlow v5 scritto in Go che riceve pacchetti sFlow da dispositivi di rete (es. Huawei NetEngine 8000), modifica il campo Source AS in base a regole configurabili, e inoltra i pacchetti arricchiti a multipli collector (es. Cloudflare Magic Transit, Noction Flow Analyzer).
+**sFlow Enricher** è un proxy sFlow v5 scritto in Go che riceve pacchetti sFlow da dispositivi di rete (es. Huawei NetEngine 8000), modifica i campi **Source AS** e **Destination AS** in base a regole configurabili, e inoltra i pacchetti arricchiti a multipli collector (es. Cloudflare Magic Transit, Noction Flow Analyzer).
 
 ### Caso d'uso principale
 
-Il router Huawei NetEngine 8000 di Goline SA (AS202032) invia pacchetti sFlow con `SrcAS = 0` per il traffico che origina dalla propria rete. Questo proxy intercetta i pacchetti, identifica gli IP sorgente appartenenti alla rete Goline (185.54.80.0/22), e sostituisce `SrcAS = 0` con `SrcAS = 202032` prima di inoltrare ai collector.
+Il router Huawei NetEngine 8000 di Goline SA (AS202032) presenta due problemi:
+
+1. **Traffico in uscita**: Invia `SrcAS = 0` per il traffico che origina dalla propria rete
+2. **Traffico in entrata**: Invia `DstASPath` vuoto per il traffico destinato alla propria rete
+
+Questo proxy intercetta i pacchetti e:
+- Per il traffico **outbound**: identifica gli IP sorgente in `185.54.80.0/22` o `2a02:4460::/32` e imposta `SrcAS = 202032`
+- Per il traffico **inbound**: identifica gli IP destinazione nelle stesse reti e inserisce `DstAS = 202032` nel path
 
 ---
 
 ## Problema Risolto
 
-### Prima (senza sFlow Enricher)
+### Problema 1: Traffico Outbound (SrcAS = 0)
 
 ```
+PRIMA:
 NetEngine 8000                     Cloudflare / Noction
-     │                                    │
-     │  sFlow: SrcIP=185.54.80.30        │
-     │         SrcAS=0  ← PROBLEMA!      │
-     └───────────────────────────────────►│
-                                          │
-                      I collector vedono SrcAS=0
-                      e non possono attribuire il
-                      traffico all'AS corretto
-```
+     │  SrcIP=185.54.80.30                │
+     │  SrcAS=0  ← PROBLEMA!              │
+     └───────────────────────────────────►│  Collector non sa chi origina il traffico
 
-### Dopo (con sFlow Enricher)
-
-```
+DOPO:
 NetEngine 8000        sFlow Enricher           Cloudflare / Noction
-     │                      │                         │
      │  SrcAS=0            │  SrcAS=202032           │
      └─────────────────────►│ (arricchito)           │
-                            └────────────────────────►│
-                                                      │
-                            I collector vedono SrcAS=202032
-                            e attribuiscono correttamente
-                            il traffico a Goline SA
+                            └────────────────────────►│  Traffico attribuito a Goline
+```
+
+### Problema 2: Traffico Inbound (DstASPath vuoto)
+
+```
+PRIMA:
+NetEngine 8000                     Cloudflare / Noction
+     │  DstIP=185.54.80.24                │
+     │  DstASPath=[]  ← PROBLEMA!         │
+     └───────────────────────────────────►│  Collector non sa la destinazione AS
+
+DOPO:
+NetEngine 8000        sFlow Enricher           Cloudflare / Noction
+     │  DstASPath=[]       │  DstASPath=[202032]     │
+     └─────────────────────►│ (arricchito)           │
+                            └────────────────────────►│  Traffico verso Goline identificato
 ```
 
 ---
@@ -76,9 +87,9 @@ NetEngine 8000        sFlow Enricher           Cloudflare / Noction
 │   185.54.80.2   │────────────────►│  │                             │   │
 │                 │   port 6343     │  │  1. Ricevi pacchetto sFlow  │   │
 │  Interfacce:    │                 │  │  2. Verifica whitelist      │   │
-│  - GE0/1/0-5    │                 │  │  3. Estrai SrcIP dal flow   │   │
+│  - GE0/1/0-5    │                 │  │  3. Estrai Src/Dst IP       │   │
 │  - 100GE0/1/54  │                 │  │  4. Match con regole        │   │
-│                 │                 │  │  5. Modifica SrcAS se match │   │
+│                 │                 │  │  5. Arricchisci SrcAS/DstAS │   │
 │  Rate: 1:1000   │                 │  │  6. Inoltra a destinazioni  │   │
 └─────────────────┘                 │  └──────────────┬──────────────┘   │
                                     │                 │                   │
@@ -105,7 +116,9 @@ NetEngine 8000        sFlow Enricher           Cloudflare / Noction
 ### Core
 | Funzionalità | Descrizione |
 |--------------|-------------|
-| **ASN Enrichment** | Modifica SrcAS basandosi su IP sorgente e regole configurabili |
+| **SrcAS Enrichment** | Modifica SrcAS per traffico outbound (modifica in-place) |
+| **DstAS Enrichment** | Inserisce DstAS nel path per traffico inbound (resize pacchetto XDR-compliant) |
+| **Multi-Sample Support** | Gestisce datagrammi con multipli sample (reverse-order processing) |
 | **Multi-Destination** | Inoltra simultaneamente a multipli collector |
 | **sFlow v5** | Supporto completo per sFlow versione 5 (IPv4 e IPv6) |
 

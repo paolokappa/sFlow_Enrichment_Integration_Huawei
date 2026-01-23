@@ -161,7 +161,10 @@ destinations:
 
 ### enrichment
 
-Rules for modifying ASN fields in sFlow packets.
+Rules for modifying ASN fields in sFlow packets. Rules are applied to **both SrcAS and DstAS**:
+
+- **SrcAS enrichment**: Applied when source IP matches the network (outbound traffic)
+- **DstAS enrichment**: Applied when destination IP matches the network AND DstASPath is empty (inbound traffic)
 
 #### enrichment.rules
 
@@ -169,9 +172,9 @@ Rules for modifying ASN fields in sFlow packets.
 |-----------|------|---------|-------------|
 | `name` | string | required | Rule name (for logging) |
 | `network` | string | required | CIDR notation (e.g., `"192.168.0.0/16"`) |
-| `match_as` | uint32 | required | Only apply if current SrcAS equals this value |
-| `set_as` | uint32 | required | New SrcAS value to set |
-| `overwrite` | bool | `false` | If true, ignore `match_as` and always overwrite |
+| `match_as` | uint32 | required | Only apply SrcAS if current value equals this |
+| `set_as` | uint32 | required | New AS value to set |
+| `overwrite` | bool | `false` | If true, ignore `match_as` and always overwrite SrcAS |
 
 ```yaml
 enrichment:
@@ -189,13 +192,23 @@ enrichment:
       overwrite: true       # Always set, regardless of current value
 ```
 
-**How it works:**
-1. For each flow sample, extract source IP from raw packet header
+**How SrcAS enrichment works (outbound traffic):**
+1. Extract source IP from raw packet header
 2. Check if source IP matches any rule's network
 3. If `overwrite: false`, only modify if current SrcAS equals `match_as`
 4. If `overwrite: true`, always modify regardless of current SrcAS
-5. Modify the SrcAS field in the sFlow packet
-6. Forward modified packet to destinations
+5. Modify the SrcAS field in-place (no packet resize)
+
+**How DstAS enrichment works (inbound traffic):**
+1. Extract destination IP from raw packet header
+2. Check if destination IP matches any rule's network
+3. Check if DstASPath is empty (length = 0)
+4. Insert AS path segment with `set_as` value (packet resize +12 bytes)
+5. Update record and sample length fields (XDR-compliant)
+
+**Multi-sample handling:**
+- Samples are processed in **reverse order** (last to first)
+- This ensures packet resizing doesn't corrupt subsequent sample offsets
 
 ---
 
