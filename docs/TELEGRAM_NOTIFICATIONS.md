@@ -1,46 +1,46 @@
-# Telegram Notifications - Documentazione Completa
+# Telegram Notifications - Complete Documentation
 
-## Indice
-1. [Panoramica](#panoramica)
+## Table of Contents
+1. [Overview](#overview)
 2. [Telegram Bot API](#telegram-bot-api)
-3. [Configurazione](#configurazione)
-4. [Tipi di Alert](#tipi-di-alert)
-5. [Formato Messaggi](#formato-messaggi)
-6. [Implementazione Go](#implementazione-go)
-7. [Gestione Shutdown](#gestione-shutdown)
+3. [Configuration](#configuration)
+4. [Alert Types](#alert-types)
+5. [Message Format](#message-format)
+6. [Go Implementation](#go-implementation)
+7. [Shutdown Handling](#shutdown-handling)
 8. [Troubleshooting](#troubleshooting)
 
 ---
 
-## Panoramica
+## Overview
 
-Il sistema di notifiche Telegram fornisce alerting in tempo reale per:
-- Avvio/arresto del servizio
-- Cambiamenti di stato delle destinazioni (up/down)
-- Situazioni di alto drop rate
+The Telegram notification system provides real-time alerting for:
+- Service startup/shutdown
+- Destination state changes (up/down)
+- High drop rate situations
 
 ---
 
 ## Telegram Bot API
 
-### Documentazione Ufficiale
+### Official Documentation
 - [Telegram Bot API](https://core.telegram.org/bots/api)
 - [sendMessage Method](https://core.telegram.org/bots/api#sendmessage)
 
-### Endpoint Utilizzato
+### Endpoint Used
 
 ```
 POST https://api.telegram.org/bot{token}/sendMessage
 ```
 
-### Parametri Request
+### Request Parameters
 
-| Parametro | Tipo | Obbligatorio | Descrizione |
-|-----------|------|--------------|-------------|
-| `chat_id` | Integer/String | Sì | ID chat o @username canale |
-| `text` | String | Sì | Testo del messaggio |
-| `parse_mode` | String | No | "Markdown" o "MarkdownV2" o "HTML" |
-| `disable_notification` | Boolean | No | Invia silenziosamente |
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `chat_id` | Integer/String | Yes | Chat ID or @username of channel |
+| `text` | String | Yes | Message text |
+| `parse_mode` | String | No | "Markdown" or "MarkdownV2" or "HTML" |
+| `disable_notification` | Boolean | No | Send silently |
 
 ### Response
 
@@ -50,7 +50,7 @@ POST https://api.telegram.org/bot{token}/sendMessage
   "result": {
     "message_id": 123,
     "from": {"id": 123456, "is_bot": true, "first_name": "BotName"},
-    "chat": {"id": -YOUR_CHAT_ID_HERE, "title": "Channel Name", "type": "channel"},
+    "chat": {"id": -1001234567890, "title": "Channel Name", "type": "channel"},
     "date": 1706040000,
     "text": "Message content"
   }
@@ -59,16 +59,16 @@ POST https://api.telegram.org/bot{token}/sendMessage
 
 ### Rate Limits
 
-Dalla documentazione Telegram:
-- Max 30 messaggi/secondo a chat diverse
-- Max 1 messaggio/secondo alla stessa chat (burst ok)
-- Max 20 messaggi/minuto allo stesso gruppo
+From Telegram documentation:
+- Max 30 messages/second to different chats
+- Max 1 message/second to the same chat (burst ok)
+- Max 20 messages/minute to the same group
 
-Per il nostro uso (alerting occasionale), non ci sono problemi di rate limiting.
+For our use case (occasional alerting), there are no rate limiting concerns.
 
 ---
 
-## Configurazione
+## Configuration
 
 ### File: `/etc/sflow-enricher/config.yaml`
 
@@ -77,7 +77,7 @@ Per il nostro uso (alerting occasionale), non ci sono problemi di rate limiting.
 telegram:
   enabled: true
   bot_token: "YOUR_BOT_TOKEN_HERE"
-  chat_id: "-YOUR_CHAT_ID_HERE"
+  chat_id: "YOUR_CHAT_ID_HERE"
   alert_on:
     - "startup"
     - "shutdown"
@@ -86,100 +86,100 @@ telegram:
     - "high_drop_rate"
 ```
 
-### Parametri
+### Parameters
 
-| Parametro | Tipo | Descrizione |
+| Parameter | Type | Description |
 |-----------|------|-------------|
-| `enabled` | bool | Abilita/disabilita notifiche |
-| `bot_token` | string | Token del bot Telegram |
-| `chat_id` | string | ID della chat/canale/gruppo |
-| `alert_on` | []string | Lista dei tipi di alert abilitati |
+| `enabled` | bool | Enable/disable notifications |
+| `bot_token` | string | Telegram bot token |
+| `chat_id` | string | Chat/channel/group ID |
+| `alert_on` | []string | List of enabled alert types |
 
 ### Chat ID
 
-- **Utente singolo**: Numero positivo (es. `123456789`)
-- **Gruppo**: Numero negativo (es. `-123456789`)
-- **Supergroup/Canale**: Numero negativo con prefisso 100 (es. `-1001234567890`)
+- **Single user**: Positive number (e.g., `123456789`)
+- **Group**: Negative number (e.g., `-123456789`)
+- **Supergroup/Channel**: Negative number with 100 prefix (e.g., `-1001234567890`)
 
-### Come Ottenere il Chat ID
+### How to Get the Chat ID
 
-1. Aggiungi il bot al gruppo/canale
-2. Invia un messaggio nel gruppo
-3. Visita: `https://api.telegram.org/bot{TOKEN}/getUpdates`
-4. Cerca `"chat":{"id":...}` nella risposta JSON
+1. Add the bot to the group/channel
+2. Send a message in the group
+3. Visit: `https://api.telegram.org/bot{TOKEN}/getUpdates`
+4. Look for `"chat":{"id":...}` in the JSON response
 
 ---
 
-## Tipi di Alert
+## Alert Types
 
 ### 1. startup
-**Trigger**: Servizio avviato e pronto
+**Trigger**: Service started and ready
 
-**Informazioni incluse**:
-- Indirizzo di ascolto
-- Versione
-- Lista regole di enrichment
-- Lista destinazioni
+**Information included**:
+- Listen address
+- Version
+- Enrichment rules list
+- Destinations list
 
 ### 2. shutdown
-**Trigger**: Servizio in fase di arresto (SIGTERM/SIGINT)
+**Trigger**: Service shutting down (SIGTERM/SIGINT)
 
-**Informazioni incluse**:
-- Uptime totale
-- Pacchetti ricevuti
-- Pacchetti enriched
-- Pacchetti dropped
-- Stato finale destinazioni
+**Information included**:
+- Total uptime
+- Packets received
+- Packets enriched
+- Packets dropped
+- Final destination status
 
 ### 3. destination_down
-**Trigger**: Health check fallito per una destinazione
+**Trigger**: Health check failed for a destination
 
-**Informazioni incluse**:
-- Nome destinazione
-- Errore specifico
-- Conteggio destinazioni healthy/totali
+**Information included**:
+- Destination name
+- Specific error
+- Healthy/total destinations count
 
 ### 4. destination_up
-**Trigger**: Destinazione tornata healthy dopo un down
+**Trigger**: Destination became healthy after being down
 
-**Informazioni incluse**:
-- Nome destinazione
-- Conteggio destinazioni healthy/totali
+**Information included**:
+- Destination name
+- Healthy/total destinations count
 
 ### 5. high_drop_rate
-**Trigger**: Drop rate supera una soglia (non ancora implementato)
+**Trigger**: Drop rate exceeds threshold (not yet implemented)
 
-**Informazioni incluse**:
-- Drop rate percentuale
-- Pacchetti dropped/totali
+**Information included**:
+- Drop rate percentage
+- Dropped/total packets
 
 ---
 
-## Formato Messaggi
+## Message Format
 
-### Struttura Standard
+### Standard Structure
 
 ```
 {ICON} *sFlow ASN Enricher*
 ━━━━━━━━━━━━━━━━━━━━━
 📍 *Host:* `hostname`
 🏷️ *Event:* `event_type`
-💬 *Details:* {message specifico}
+💬 *Details:* {specific message}
 🕐 *Time:* `DD/MM/YYYY HH:MM:SS`
 ```
 
-### Icone per Tipo
+### Icons by Type
 
-| Tipo | Icona | Significato |
-|------|-------|-------------|
-| startup | 🟢 | Servizio avviato |
-| shutdown | 🔴 | Servizio in arresto |
-| destination_down | 🔻 | Destinazione down |
-| destination_up | 🔺 | Destinazione up |
-| high_drop_rate | 📉 | Alto drop rate |
-| default | ℹ️ | Informazione generica |
+| Type | Icon | Meaning |
+|------|------|---------|
+| startup | 🟢 | Service started |
+| shutdown | 🔴 | Service stopping |
+| destination_down | 🔻 | Destination down |
+| destination_up | 🔺 | Destination up |
+| high_drop_rate | 📉 | High drop rate |
+| default | ℹ️ | Generic information |
 
-### Esempio: Startup
+### Example: Startup
 
 ```
 🟢 *sFlow ASN Enricher*
@@ -197,7 +197,7 @@ telegram:
 🕐 *Time:* `23/01/2026 20:06:02`
 ```
 
-### Esempio: Shutdown
+### Example: Shutdown
 
 ```
 🔴 *sFlow ASN Enricher*
@@ -215,7 +215,7 @@ telegram:
 🕐 *Time:* `23/01/2026 22:21:32`
 ```
 
-### Esempio: Destination Down
+### Example: Destination Down
 
 ```
 🔻 *sFlow ASN Enricher*
@@ -230,9 +230,9 @@ telegram:
 
 ---
 
-## Implementazione Go
+## Go Implementation
 
-### Struttura Config
+### Config Structure
 
 ```go
 type TelegramConfig struct {
@@ -243,7 +243,7 @@ type TelegramConfig struct {
 }
 ```
 
-### Funzione Principale
+### Main Function
 
 ```go
 func sendTelegramAlert(alertType, message string) {
@@ -255,7 +255,7 @@ func sendTelegramAlertWithWait(alertType, message string, blocking bool) {
         return
     }
 
-    // Verifica se questo tipo di alert è abilitato
+    // Check if this alert type is enabled
     enabled := false
     for _, t := range cfg.Telegram.AlertOn {
         if t == alertType {
@@ -274,7 +274,7 @@ func sendTelegramAlertWithWait(alertType, message string, blocking bool) {
     doSend := func() {
         hostname, _ := os.Hostname()
 
-        // Icona basata sul tipo di alert
+        // Icon based on alert type
         icon := "ℹ️"
         switch alertType {
         case "startup":
@@ -289,7 +289,7 @@ func sendTelegramAlertWithWait(alertType, message string, blocking bool) {
             icon = "📉"
         }
 
-        // Formato messaggio con data europea DD/MM/YYYY
+        // Message format with European date DD/MM/YYYY
         fullMessage := fmt.Sprintf(
             "%s *sFlow ASN Enricher*\n"+
                 "━━━━━━━━━━━━━━━━━━━━━\n"+
@@ -337,31 +337,31 @@ func sendTelegramAlertWithWait(alertType, message string, blocking bool) {
 
 ### Markdown Escaping
 
-Telegram Markdown richiede escape di alcuni caratteri:
+Telegram Markdown requires escaping certain characters:
 
-| Carattere | Escape |
+| Character | Escape |
 |-----------|--------|
 | `_` | `\_` |
 | `*` | `\*` |
 | `` ` `` | `` \` `` |
 | `[` | `\[` |
 
-Nel nostro caso, usiamo backtick per codice inline che non richiede escape interno.
+In our case, we use backticks for inline code which doesn't require internal escaping.
 
 ---
 
-## Gestione Shutdown
+## Shutdown Handling
 
-### Il Problema
+### The Problem
 
-Durante lo shutdown (SIGTERM), il processo deve:
-1. Inviare la notifica Telegram
-2. Attendere che venga inviata
-3. Solo poi terminare
+During shutdown (SIGTERM), the process must:
+1. Send the Telegram notification
+2. Wait for it to be sent
+3. Only then terminate
 
-Se la notifica è asincrona (goroutine), il processo potrebbe terminare prima che la HTTP request completi.
+If the notification is asynchronous (goroutine), the process might terminate before the HTTP request completes.
 
-### La Soluzione: Blocking Mode
+### The Solution: Blocking Mode
 
 ```go
 case syscall.SIGINT, syscall.SIGTERM:
@@ -370,7 +370,7 @@ case syscall.SIGINT, syscall.SIGTERM:
         "signal": sig.String(),
     })
 
-    // Invia notifica e ATTENDI che completi (blocking=true)
+    // Send notification and WAIT for completion (blocking=true)
     sendTelegramAlertWithWait("shutdown", fmt.Sprintf(
         "Service shutting down\n"+
             "⏱️ Uptime: `%s`\n"+
@@ -384,7 +384,7 @@ case syscall.SIGINT, syscall.SIGTERM:
         atomic.LoadUint64(&stats.PacketsDropped),
         destStats), true)  // <-- blocking=true
 
-    // Solo ORA chiudiamo tutto
+    // Only NOW close everything
     close(stopChan)
     listener.Close()
     wg.Wait()
@@ -393,52 +393,52 @@ case syscall.SIGINT, syscall.SIGTERM:
 
 ### Timeout Considerations
 
-`TimeoutStopSec=30` nella unit file garantisce che systemd attenda fino a 30 secondi prima di forzare SIGKILL. La HTTP request a Telegram normalmente completa in < 1 secondo.
+`TimeoutStopSec=30` in the unit file ensures systemd waits up to 30 seconds before forcing SIGKILL. The HTTP request to Telegram normally completes in < 1 second.
 
 ---
 
 ## Troubleshooting
 
-### Notifica Non Arriva
+### Notification Not Arriving
 
-1. **Verifica token**:
+1. **Verify token**:
    ```bash
    curl "https://api.telegram.org/bot{TOKEN}/getMe"
    ```
-   Risposta OK: `{"ok":true,"result":{"id":...,"is_bot":true,...}}`
+   OK response: `{"ok":true,"result":{"id":...,"is_bot":true,...}}`
 
-2. **Verifica chat_id**:
+2. **Verify chat_id**:
    ```bash
    curl "https://api.telegram.org/bot{TOKEN}/sendMessage" \
      -d "chat_id={CHAT_ID}" \
      -d "text=Test"
    ```
 
-3. **Verifica che il bot sia nel gruppo/canale**:
-   - Per i canali: il bot deve essere amministratore
+3. **Verify bot is in the group/channel**:
+   - For channels: the bot must be an administrator
 
-4. **Controlla i log**:
+4. **Check logs**:
    ```bash
    journalctl -u sflow-enricher | grep -i telegram
    ```
 
-### Errori Comuni
+### Common Errors
 
-| Errore | Causa | Soluzione |
-|--------|-------|-----------|
-| 401 Unauthorized | Token invalido | Verifica token |
-| 400 Bad Request: chat not found | Chat ID errato | Verifica chat_id |
-| 403 Forbidden: bot was kicked | Bot rimosso dal gruppo | Aggiungi di nuovo il bot |
-| 429 Too Many Requests | Rate limit | Riduci frequenza messaggi |
+| Error | Cause | Solution |
+|-------|-------|----------|
+| 401 Unauthorized | Invalid token | Verify token |
+| 400 Bad Request: chat not found | Wrong Chat ID | Verify chat_id |
+| 403 Forbidden: bot was kicked | Bot removed from group | Add the bot again |
+| 429 Too Many Requests | Rate limit | Reduce message frequency |
 
-### Test Manuale
+### Manual Test
 
 ```bash
-# Test con curl
-curl -X POST "https://api.telegram.org/botYOUR_BOT_TOKEN_HERE/sendMessage" \
+# Test with curl
+curl -X POST "https://api.telegram.org/bot{YOUR_TOKEN}/sendMessage" \
   -H "Content-Type: application/json" \
   -d '{
-    "chat_id": "-YOUR_CHAT_ID_HERE",
+    "chat_id": "{YOUR_CHAT_ID}",
     "text": "🧪 *Test Message*\n━━━━━━━━━━━━━━━\nThis is a test from sflow-enricher",
     "parse_mode": "Markdown"
   }'
@@ -446,7 +446,7 @@ curl -X POST "https://api.telegram.org/botYOUR_BOT_TOKEN_HERE/sendMessage" \
 
 ---
 
-## Riferimenti
+## References
 
 1. [Telegram Bot API - Official Documentation](https://core.telegram.org/bots/api)
 2. [Telegram Bot API - sendMessage](https://core.telegram.org/bots/api#sendmessage)
@@ -455,10 +455,10 @@ curl -X POST "https://api.telegram.org/botYOUR_BOT_TOKEN_HERE/sendMessage" \
 
 ---
 
-## Autore
+## Author
 
 **Paolo Caparrelli** - GOLINE SA
 **Email**: soc@goline.ch
-**Data**: 23/01/2026
+**Date**: 23/01/2026
 
 **Co-Authored-By**: Claude Opus 4.5 (Anthropic)

@@ -1,72 +1,72 @@
-# Systemd Integration - Documentazione Completa
+# Systemd Integration - Complete Documentation
 
-## Indice
-1. [Panoramica](#panoramica)
+## Table of Contents
+1. [Overview](#overview)
 2. [Systemd Notify Protocol](#systemd-notify-protocol)
 3. [Watchdog Mechanism](#watchdog-mechanism)
 4. [Auto-Restart Configuration](#auto-restart-configuration)
 5. [Service Unit File](#service-unit-file)
-6. [Implementazione Go](#implementazione-go)
+6. [Go Implementation](#go-implementation)
 7. [Security Hardening](#security-hardening)
-8. [Test e Verifica](#test-e-verifica)
+8. [Testing and Verification](#testing-and-verification)
 
 ---
 
-## Panoramica
+## Overview
 
-Il servizio sFlow ASN Enricher è configurato come **mission-critical** con:
-- **Type=notify**: Il servizio notifica systemd quando è pronto
-- **WatchdogSec=30**: Systemd verifica che il servizio sia attivo ogni 30 secondi
-- **Restart=always**: Riavvio automatico in caso di crash
-- **Nice=-10, CPUWeight=200**: Priorità elevata per scheduling CPU
+The sFlow ASN Enricher service is configured as **mission-critical** with:
+- **Type=notify**: The service notifies systemd when it's ready
+- **WatchdogSec=30**: Systemd verifies the service is active every 30 seconds
+- **Restart=always**: Automatic restart on crash
+- **Nice=-10, CPUWeight=200**: High priority for CPU scheduling
 
 ---
 
 ## Systemd Notify Protocol
 
-### Documentazione Ufficiale
+### Official Documentation
 - [systemd.service(5)](https://www.freedesktop.org/software/systemd/man/systemd.service.html)
 - [sd_notify(3)](https://www.freedesktop.org/software/systemd/man/sd_notify.html)
 
-### Come Funziona
+### How It Works
 
-Il servizio comunica con systemd tramite un socket Unix (AF_UNIX, SOCK_DGRAM) il cui path è in `$NOTIFY_SOCKET`.
+The service communicates with systemd via a Unix socket (AF_UNIX, SOCK_DGRAM) whose path is in `$NOTIFY_SOCKET`.
 
-**Messaggi supportati**:
+**Supported messages**:
 
-| Messaggio | Significato |
-|-----------|-------------|
-| `READY=1` | Servizio pronto ad accettare richieste |
-| `STOPPING=1` | Servizio in fase di shutdown |
-| `WATCHDOG=1` | Heartbeat - il servizio è ancora attivo |
-| `STATUS=...` | Stato testuale per `systemctl status` |
-| `ERRNO=...` | Codice di errore errno |
-| `MAINPID=...` | PID del processo principale |
+| Message | Meaning |
+|---------|---------|
+| `READY=1` | Service ready to accept requests |
+| `STOPPING=1` | Service shutting down |
+| `WATCHDOG=1` | Heartbeat - service is still active |
+| `STATUS=...` | Text status for `systemctl status` |
+| `ERRNO=...` | Error code errno |
+| `MAINPID=...` | Main process PID |
 
-### Sequenza di Vita del Servizio
+### Service Lifecycle Sequence
 
 ```
-1. systemd avvia il processo
-2. Processo inizializza (config, socket, destinations)
-3. Processo invia READY=1
-4. systemd considera il servizio "active (running)"
-5. [Loop] Processo invia WATCHDOG=1 ogni WatchdogSec/2
-6. Alla ricezione di SIGTERM:
-   6a. Processo invia STOPPING=1
-   6b. Processo completa cleanup
-   6c. Processo termina
-7. systemd rileva exit, decide se riavviare
+1. systemd starts the process
+2. Process initializes (config, socket, destinations)
+3. Process sends READY=1
+4. systemd considers service "active (running)"
+5. [Loop] Process sends WATCHDOG=1 every WatchdogSec/2
+6. Upon receiving SIGTERM:
+   6a. Process sends STOPPING=1
+   6b. Process completes cleanup
+   6c. Process terminates
+7. systemd detects exit, decides whether to restart
 ```
 
 ---
 
 ## Watchdog Mechanism
 
-### Scopo
+### Purpose
 
-Il watchdog garantisce che il servizio non sia in deadlock o hang. Se il servizio non invia `WATCHDOG=1` entro `WatchdogSec`, systemd lo considera "failed" e lo riavvia.
+The watchdog ensures the service is not in deadlock or hung. If the service doesn't send `WATCHDOG=1` within `WatchdogSec`, systemd considers it "failed" and restarts it.
 
-### Configurazione systemd
+### Systemd Configuration
 
 ```ini
 [Service]
@@ -74,41 +74,41 @@ Type=notify
 WatchdogSec=30
 ```
 
-### Calcolo dell'Intervallo
+### Interval Calculation
 
-Dalla documentazione systemd:
+From systemd documentation:
 > "It is recommended that this setting is used together with Type=notify. If WatchdogSec= is used without Type=notify, the service manager will not be notified of service readiness."
 
-**Best Practice**: Inviare il watchdog a metà dell'intervallo configurato.
+**Best Practice**: Send the watchdog at half the configured interval.
 
 ```
-WatchdogSec=30 → Invia WATCHDOG=1 ogni 15 secondi
+WatchdogSec=30 → Send WATCHDOG=1 every 15 seconds
 ```
 
 ### Environment Variable
 
-Quando systemd avvia il servizio con watchdog attivo, imposta:
+When systemd starts the service with watchdog enabled, it sets:
 ```
-WATCHDOG_USEC=30000000   # 30 secondi in microsecondi
+WATCHDOG_USEC=30000000   # 30 seconds in microseconds
 ```
 
-Il servizio legge questa variabile per determinare l'intervallo.
+The service reads this variable to determine the interval.
 
 ---
 
 ## Auto-Restart Configuration
 
-### Opzioni di Restart
+### Restart Options
 
-| Opzione | Comportamento |
-|---------|---------------|
-| `no` | Mai riavviare |
-| `on-success` | Solo se exit code = 0 |
-| `on-failure` | Solo se exit code ≠ 0 o killed |
-| `on-abnormal` | Solo se killed da signal o timeout |
-| `on-abort` | Solo se killed da signal |
-| `on-watchdog` | Solo se watchdog timeout |
-| `always` | Sempre riavviare |
+| Option | Behavior |
+|--------|----------|
+| `no` | Never restart |
+| `on-success` | Only if exit code = 0 |
+| `on-failure` | Only if exit code ≠ 0 or killed |
+| `on-abnormal` | Only if killed by signal or timeout |
+| `on-abort` | Only if killed by signal |
+| `on-watchdog` | Only if watchdog timeout |
+| `always` | Always restart |
 
 ### Rate Limiting
 
@@ -118,7 +118,7 @@ StartLimitIntervalSec=300
 StartLimitBurst=5
 ```
 
-**Significato**: Massimo 5 avvii in 300 secondi (5 minuti). Se superato, il servizio entra in stato "failed" e non viene più riavviato automaticamente.
+**Meaning**: Maximum 5 starts in 300 seconds (5 minutes). If exceeded, the service enters "failed" state and won't be automatically restarted.
 
 ### RestartSec
 
@@ -127,16 +127,16 @@ StartLimitBurst=5
 RestartSec=3
 ```
 
-Attende 3 secondi prima di riavviare dopo un crash. Questo previene:
-- CPU thrashing in caso di crash immediato
-- Problemi di resource exhaustion
+Waits 3 seconds before restarting after a crash. This prevents:
+- CPU thrashing on immediate crash
+- Resource exhaustion issues
 - Log flooding
 
 ---
 
 ## Service Unit File
 
-### File Completo: `/etc/systemd/system/sflow-enricher.service`
+### Complete File: `/etc/systemd/system/sflow-enricher.service`
 
 ```ini
 [Unit]
@@ -185,60 +185,60 @@ SyslogIdentifier=sflow-enricher
 WantedBy=multi-user.target
 ```
 
-### Spiegazione Dettagliata
+### Detailed Explanation
 
 #### [Unit] Section
 
-| Direttiva | Valore | Spiegazione |
-|-----------|--------|-------------|
-| `Description` | sFlow ASN Enricher - Mission Critical | Nome descrittivo |
-| `Documentation` | URL GitHub | Link alla documentazione |
-| `After` | network-online.target | Avvia dopo che la rete è attiva |
-| `Wants` | network-online.target | Dipendenza soft sulla rete |
-| `StartLimitIntervalSec` | 300 | Finestra temporale per rate limiting (5 min) |
-| `StartLimitBurst` | 5 | Max avvii nella finestra |
+| Directive | Value | Explanation |
+|-----------|-------|-------------|
+| `Description` | sFlow ASN Enricher - Mission Critical | Descriptive name |
+| `Documentation` | GitHub URL | Link to documentation |
+| `After` | network-online.target | Start after network is active |
+| `Wants` | network-online.target | Soft dependency on network |
+| `StartLimitIntervalSec` | 300 | Time window for rate limiting (5 min) |
+| `StartLimitBurst` | 5 | Max starts within the window |
 
 #### [Service] Section - Lifecycle
 
-| Direttiva | Valore | Spiegazione |
-|-----------|--------|-------------|
-| `Type` | notify | Usa sd_notify protocol |
-| `ExecStart` | /usr/local/bin/sflow-enricher ... | Comando di avvio |
-| `ExecReload` | /bin/kill -HUP $MAINPID | Comando per reload config |
-| `Restart` | always | Riavvia sempre dopo exit |
-| `RestartSec` | 3 | Attesa prima di riavviare |
-| `WatchdogSec` | 30 | Timeout watchdog |
+| Directive | Value | Explanation |
+|-----------|-------|-------------|
+| `Type` | notify | Uses sd_notify protocol |
+| `ExecStart` | /usr/local/bin/sflow-enricher ... | Startup command |
+| `ExecReload` | /bin/kill -HUP $MAINPID | Config reload command |
+| `Restart` | always | Always restart after exit |
+| `RestartSec` | 3 | Wait time before restart |
+| `WatchdogSec` | 30 | Watchdog timeout |
 
 #### [Service] Section - Shutdown
 
-| Direttiva | Valore | Spiegazione |
-|-----------|--------|-------------|
-| `TimeoutStartSec` | 30 | Max tempo per startup |
-| `TimeoutStopSec` | 30 | Max tempo per shutdown |
-| `KillMode` | mixed | SIGTERM al main, SIGKILL ai figli |
-| `KillSignal` | SIGTERM | Segnale di terminazione graceful |
+| Directive | Value | Explanation |
+|-----------|-------|-------------|
+| `TimeoutStartSec` | 30 | Max time for startup |
+| `TimeoutStopSec` | 30 | Max time for shutdown |
+| `KillMode` | mixed | SIGTERM to main, SIGKILL to children |
+| `KillSignal` | SIGTERM | Graceful termination signal |
 
 #### [Service] Section - Priority
 
-| Direttiva | Valore | Spiegazione |
-|-----------|--------|-------------|
-| `Nice` | -10 | Priorità CPU elevata (-20 = max, 19 = min) |
-| `LimitNOFILE` | 65535 | Max file descriptor aperti |
-| `MemoryMax` | 256M | Limite memoria hard |
-| `CPUWeight` | 200 | Peso CPU relativo (100 = default, 200 = doppio) |
+| Directive | Value | Explanation |
+|-----------|-------|-------------|
+| `Nice` | -10 | High CPU priority (-20 = max, 19 = min) |
+| `LimitNOFILE` | 65535 | Max open file descriptors |
+| `MemoryMax` | 256M | Hard memory limit |
+| `CPUWeight` | 200 | Relative CPU weight (100 = default, 200 = double) |
 
 ---
 
-## Implementazione Go
+## Go Implementation
 
-### Funzione sdNotify
+### sdNotify Function
 
 ```go
 // sdNotify sends a notification to systemd via the notify socket
 func sdNotify(state string) {
     socketPath := os.Getenv("NOTIFY_SOCKET")
     if socketPath == "" {
-        return  // Non siamo sotto systemd
+        return  // Not running under systemd
     }
 
     conn, err := net.Dial("unixgram", socketPath)
@@ -251,26 +251,26 @@ func sdNotify(state string) {
 }
 ```
 
-**Note**:
-- `NOTIFY_SOCKET` è impostato solo se `Type=notify`
-- Il socket è AF_UNIX di tipo SOCK_DGRAM (datagram)
-- Path tipico: `/run/systemd/notify` o abstract socket
+**Notes**:
+- `NOTIFY_SOCKET` is set only if `Type=notify`
+- The socket is AF_UNIX of type SOCK_DGRAM (datagram)
+- Typical path: `/run/systemd/notify` or abstract socket
 
-### Funzioni Wrapper
+### Wrapper Functions
 
 ```go
-// sdReady notifica systemd che il servizio è pronto
+// sdReady notifies systemd that the service is ready
 func sdReady() {
     sdNotify("READY=1")
     logInfo("Systemd notified: READY", nil)
 }
 
-// sdWatchdog invia il heartbeat
+// sdWatchdog sends the heartbeat
 func sdWatchdog() {
     sdNotify("WATCHDOG=1")
 }
 
-// sdStopping notifica l'inizio dello shutdown
+// sdStopping notifies the start of shutdown
 func sdStopping() {
     sdNotify("STOPPING=1")
 }
@@ -280,10 +280,10 @@ func sdStopping() {
 
 ```go
 func startWatchdog() {
-    // Leggi l'intervallo dall'environment
+    // Read interval from environment
     watchdogUSec := os.Getenv("WATCHDOG_USEC")
     if watchdogUSec == "" {
-        return  // Watchdog non configurato
+        return  // Watchdog not configured
     }
 
     usec, err := strconv.ParseInt(watchdogUSec, 10, 64)
@@ -291,7 +291,7 @@ func startWatchdog() {
         return
     }
 
-    // Notifica a metà dell'intervallo (best practice)
+    // Notify at half the interval (best practice)
     interval := time.Duration(usec/2) * time.Microsecond
     logInfo("Watchdog started", map[string]interface{}{
         "interval": interval.String(),
@@ -306,7 +306,7 @@ func startWatchdog() {
 }
 ```
 
-### Sequence Completa nel main()
+### Complete Sequence in main()
 
 ```go
 func main() {
@@ -324,7 +324,7 @@ func main() {
     go healthChecker()
     go statsReporter()
 
-    // 5. NOTIFY READY - servizio operativo
+    // 5. NOTIFY READY - service operational
     sdReady()
     startWatchdog()
 
@@ -359,40 +359,40 @@ func main() {
 
 ## Security Hardening
 
-### Direttive di Sicurezza
+### Security Directives
 
-| Direttiva | Effetto |
-|-----------|---------|
-| `NoNewPrivileges=yes` | Il processo non può acquisire nuovi privilegi |
-| `ProtectSystem=strict` | Filesystem montato read-only tranne /dev, /proc, /sys |
-| `ProtectHome=yes` | /home, /root, /run/user inaccessibili |
-| `PrivateTmp=yes` | /tmp privato isolato |
+| Directive | Effect |
+|-----------|--------|
+| `NoNewPrivileges=yes` | Process cannot acquire new privileges |
+| `ProtectSystem=strict` | Filesystem mounted read-only except /dev, /proc, /sys |
+| `ProtectHome=yes` | /home, /root, /run/user inaccessible |
+| `PrivateTmp=yes` | Private isolated /tmp |
 | `ReadOnlyPaths=/etc/sflow-enricher` | Config directory read-only |
 
-### Perché Queste Scelte
+### Why These Choices
 
-1. **NoNewPrivileges**: Previene privilege escalation se il binario viene compromesso
+1. **NoNewPrivileges**: Prevents privilege escalation if the binary is compromised
 
-2. **ProtectSystem=strict**: Il servizio non può modificare il sistema. Se deve scrivere log, usa journald.
+2. **ProtectSystem=strict**: The service cannot modify the system. If it needs to write logs, it uses journald.
 
-3. **ProtectHome**: Il servizio non ha bisogno di accedere a home directory
+3. **ProtectHome**: The service doesn't need access to home directories
 
-4. **PrivateTmp**: Isola i file temporanei, previene symlink attacks
+4. **PrivateTmp**: Isolates temporary files, prevents symlink attacks
 
-5. **ReadOnlyPaths**: La configurazione non deve essere modificata a runtime
+5. **ReadOnlyPaths**: Configuration should not be modified at runtime
 
 ---
 
-## Test e Verifica
+## Testing and Verification
 
-### 1. Verifica Startup
+### 1. Verify Startup
 
 ```bash
 systemctl start sflow-enricher
 systemctl status sflow-enricher
 ```
 
-Output atteso:
+Expected output:
 ```
 ● sflow-enricher.service - sFlow ASN Enricher - Mission Critical
      Loaded: loaded (/etc/systemd/system/sflow-enricher.service; enabled)
@@ -402,11 +402,11 @@ Output atteso:
 ### 2. Test Watchdog
 
 ```bash
-# Verifica che il watchdog sia attivo
+# Verify watchdog is active
 journalctl -u sflow-enricher | grep -i watchdog
 ```
 
-Output atteso:
+Expected output:
 ```
 [INFO] Watchdog started map[interval:15s]
 ```
@@ -414,20 +414,20 @@ Output atteso:
 ### 3. Test Auto-Restart
 
 ```bash
-# Simula crash con kill -9 (SIGKILL, non intercettabile)
+# Simulate crash with kill -9 (SIGKILL, not interceptable)
 kill -9 $(pgrep sflow-enricher)
 
-# Verifica riavvio automatico
+# Verify automatic restart
 sleep 5
 systemctl status sflow-enricher
 ```
 
-Output atteso:
+Expected output:
 ```
 Active: active (running)
 ```
 
-Con log:
+With log:
 ```
 Main process exited, code=killed, status=9/KILL
 sflow-enricher.service: Scheduled restart job
@@ -437,73 +437,73 @@ Started sFlow ASN Enricher - Mission Critical
 ### 4. Test Graceful Shutdown
 
 ```bash
-# Invia SIGTERM (shutdown graceful)
+# Send SIGTERM (graceful shutdown)
 systemctl stop sflow-enricher
 
-# Verifica che Telegram riceva la notifica
+# Verify Telegram receives the notification
 ```
 
 ### 5. Test Rate Limiting
 
 ```bash
-# Crash multipli rapidi
+# Multiple rapid crashes
 for i in {1..6}; do
     kill -9 $(pgrep sflow-enricher) 2>/dev/null
     sleep 1
 done
 
-# Dopo 5 crash in < 5 minuti, il servizio non viene più riavviato
+# After 5 crashes in < 5 minutes, service won't restart
 systemctl status sflow-enricher
 ```
 
-Output atteso dopo il 6° crash:
+Expected output after 6th crash:
 ```
 Active: failed (Result: start-limit-hit)
 ```
 
-### 6. Reset dopo Rate Limit
+### 6. Reset After Rate Limit
 
 ```bash
-# Resetta il contatore
+# Reset the counter
 systemctl reset-failed sflow-enricher
 
-# Ora può ripartire
+# Now it can start again
 systemctl start sflow-enricher
 ```
 
 ---
 
-## Comandi Utili
+## Useful Commands
 
 ```bash
-# Status dettagliato
+# Detailed status
 systemctl status sflow-enricher -l
 
-# Log in tempo reale
+# Real-time logs
 journalctl -u sflow-enricher -f
 
-# Ultimi 100 log
+# Last 100 logs
 journalctl -u sflow-enricher -n 100
 
-# Reload configurazione (SIGHUP)
+# Reload configuration (SIGHUP)
 systemctl reload sflow-enricher
 
-# Restart completo
+# Full restart
 systemctl restart sflow-enricher
 
-# Verifica unit file
+# Verify unit file
 systemd-analyze verify /etc/systemd/system/sflow-enricher.service
 
-# Mostra proprietà runtime
+# Show runtime properties
 systemctl show sflow-enricher
 
-# Mostra cgroup e risorse
+# Show cgroup and resources
 systemctl status sflow-enricher --no-pager -l
 ```
 
 ---
 
-## Riferimenti
+## References
 
 1. [systemd.service(5) - Service unit configuration](https://www.freedesktop.org/software/systemd/man/systemd.service.html)
 2. [systemd.exec(5) - Execution environment](https://www.freedesktop.org/software/systemd/man/systemd.exec.html)
@@ -513,10 +513,10 @@ systemctl status sflow-enricher --no-pager -l
 
 ---
 
-## Autore
+## Author
 
 **Paolo Caparrelli** - GOLINE SA
 **Email**: soc@goline.ch
-**Data**: 23/01/2026
+**Date**: 23/01/2026
 
 **Co-Authored-By**: Claude Opus 4.5 (Anthropic)

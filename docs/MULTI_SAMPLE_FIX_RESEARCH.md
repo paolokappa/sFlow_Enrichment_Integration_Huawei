@@ -1,46 +1,46 @@
-# Multi-Sample Bug Fix - Documentazione Tecnica Completa
+# Multi-Sample Bug Fix - Complete Technical Documentation
 
-## Indice
-1. [Problema Identificato](#problema-identificato)
-2. [Ricerca sFlow v5 Specification](#ricerca-sflow-v5-specification)
-3. [Ricerca RFC 4506 - XDR Encoding](#ricerca-rfc-4506---xdr-encoding)
-4. [Ricerca RFC 3176 - sFlow Original](#ricerca-rfc-3176---sflow-original)
-5. [Analisi Implementazioni Esistenti](#analisi-implementazioni-esistenti)
-6. [Strategie di Fix Analizzate](#strategie-di-fix-analizzate)
-7. [Soluzione Implementata](#soluzione-implementata)
-8. [Verifica e Test](#verifica-e-test)
+## Table of Contents
+1. [Problem Identified](#problem-identified)
+2. [sFlow v5 Specification Research](#sflow-v5-specification-research)
+3. [RFC 4506 - XDR Encoding Research](#rfc-4506---xdr-encoding-research)
+4. [RFC 3176 - Original sFlow Research](#rfc-3176---original-sflow-research)
+5. [Existing Implementations Analysis](#existing-implementations-analysis)
+6. [Fix Strategies Analyzed](#fix-strategies-analyzed)
+7. [Implemented Solution](#implemented-solution)
+8. [Verification and Testing](#verification-and-testing)
 
 ---
 
-## Problema Identificato
+## Problem Identified
 
-### Contesto
-Il sFlow ASN Enricher per Huawei NetEngine deve modificare i pacchetti sFlow v5 per:
-1. **SrcAS**: Impostare AS202032 quando `SrcAS=0` e `src_ip` appartiene a `185.54.80.0/22` o `2a02:4460::/32`
-2. **DstAS**: Inserire AS202032 nel `DstASPath` quando è vuoto e `dst_ip` appartiene alle reti Goline
+### Context
+The sFlow ASN Enricher for Huawei NetEngine must modify sFlow v5 packets to:
+1. **SrcAS**: Set AS202032 when `SrcAS=0` and `src_ip` belongs to `185.54.80.0/22` or `2a02:4460::/32`
+2. **DstAS**: Insert AS202032 in `DstASPath` when empty and `dst_ip` belongs to Goline networks
 
-### Il Bug Multi-Sample
-Quando `ModifyDstAS()` inserisce 12 byte per il segmento AS path:
+### The Multi-Sample Bug
+When `ModifyDstAS()` inserts 12 bytes for the AS path segment:
 
 ```
-PRIMA della modifica:
-[Header Datagram][Sample0 @ offset 100][Sample1 @ offset 300][Sample2 @ offset 500]
+BEFORE modification:
+[Datagram Header][Sample0 @ offset 100][Sample1 @ offset 300][Sample2 @ offset 500]
 
-DOPO la modifica di Sample0 (+12 byte):
-[Header Datagram][Sample0+12 @ offset 100][Sample1 @ offset 312][Sample2 @ offset 512]
+AFTER modifying Sample0 (+12 bytes):
+[Datagram Header][Sample0+12 @ offset 100][Sample1 @ offset 312][Sample2 @ offset 512]
                                            ↑                      ↑
-                                           Gli offset memorizzati (300, 500) sono ora INVALIDI!
+                                           Stored offsets (300, 500) are now INVALID!
 ```
 
-Il problema: `datagram.Samples[1].Offset` contiene ancora `300` (calcolato dal pacchetto originale), ma nel nuovo pacchetto Sample1 si trova a `312`.
+The problem: `datagram.Samples[1].Offset` still contains `300` (calculated from the original packet), but in the new packet Sample1 is located at `312`.
 
 ---
 
-## Ricerca sFlow v5 Specification
+## sFlow v5 Specification Research
 
-### Fonte: [sflow.org/SFLOW-DATAGRAM5.txt](https://sflow.org/SFLOW-DATAGRAM5.txt)
+### Source: [sflow.org/SFLOW-DATAGRAM5.txt](https://sflow.org/SFLOW-DATAGRAM5.txt)
 
-### Struttura Datagram v5
+### Datagram v5 Structure
 
 ```c
 struct sample_datagram_v5 {
@@ -52,7 +52,7 @@ struct sample_datagram_v5 {
 };
 ```
 
-### Struttura Sample Record
+### Sample Record Structure
 
 ```c
 struct sample_record {
@@ -61,9 +61,9 @@ struct sample_record {
 };
 ```
 
-**Chiave**: L'uso di `opaque<>` indica dati di lunghezza variabile con prefisso di lunghezza (XDR encoding).
+**Key**: The use of `opaque<>` indicates variable-length data with length prefix (XDR encoding).
 
-### Struttura Flow Sample
+### Flow Sample Structure
 
 ```c
 struct flow_sample {
@@ -74,7 +74,7 @@ struct flow_sample {
    unsigned int drops;
    interface input;
    interface output;
-   flow_record flow_records<>;   // Variable-length array di record
+   flow_record flow_records<>;   // Variable-length array of records
 };
 ```
 
@@ -97,7 +97,7 @@ struct as_path_type {
 };
 ```
 
-### Nota Critica dalla Specifica
+### Critical Note from Specification
 
 > "Applications receiving sFlow data must always use the opaque length information when decoding opaque<> structures so that encountering extended structures will not cause decoding errors."
 
@@ -105,23 +105,23 @@ struct as_path_type {
 
 ---
 
-## Ricerca RFC 4506 - XDR Encoding
+## RFC 4506 - XDR Encoding Research
 
-### Fonte: [RFC 4506 - XDR: External Data Representation Standard](https://www.rfc-editor.org/rfc/rfc4506)
+### Source: [RFC 4506 - XDR: External Data Representation Standard](https://www.rfc-editor.org/rfc/rfc4506)
 
-### Principi Fondamentali XDR
+### Fundamental XDR Principles
 
-1. **Unità Base**: 4 byte, 32 bit, serializzati in big-endian
-2. **Allineamento**: Tutti i dati devono essere allineati a 4 byte
-3. **Tipi più piccoli**: Occupano comunque 4 byte dopo l'encoding
+1. **Base Unit**: 4 bytes, 32 bits, serialized in big-endian
+2. **Alignment**: All data must be aligned to 4 bytes
+3. **Smaller Types**: Still occupy 4 bytes after encoding
 
 ### Variable-Length Opaque Data
 
-Dalla RFC 4506, Sezione 4.10:
+From RFC 4506, Section 4.10:
 
 ```
-opaque identifier<m>;    // con limite massimo m
-opaque identifier<>;     // senza limite (max 2^32 - 1)
+opaque identifier<m>;    // with maximum limit m
+opaque identifier<>;     // no limit (max 2^32 - 1)
 ```
 
 **Encoding**:
@@ -141,27 +141,27 @@ opaque identifier<>;     // senza limite (max 2^32 - 1)
 
 > "If n is not a multiple of four, then the n bytes are followed by enough (0 to 3) residual zero bytes, r, to make the total byte count a multiple of four."
 
-### Implicazioni per la Modifica
+### Implications for Modification
 
-Quando inseriamo 12 byte per DstAS:
-- 4 byte: segment type (AS_SEQUENCE = 2)
-- 4 byte: segment length (1 ASN)
-- 4 byte: ASN value (202032)
+When we insert 12 bytes for DstAS:
+- 4 bytes: segment type (AS_SEQUENCE = 2)
+- 4 bytes: segment length (1 ASN)
+- 4 bytes: ASN value (202032)
 
-Totale: 12 byte, già allineato a 4 byte (12 % 4 = 0), nessun padding necessario.
+Total: 12 bytes, already aligned to 4 bytes (12 % 4 = 0), no padding needed.
 
-**IMPORTANTE**: Dopo l'inserimento, dobbiamo aggiornare:
-1. `DstASPathLen`: da 0 a 1 (numero di segmenti)
-2. `record_length`: +12 byte
-3. `sample_length`: +12 byte
+**IMPORTANT**: After insertion, we must update:
+1. `DstASPathLen`: from 0 to 1 (number of segments)
+2. `record_length`: +12 bytes
+3. `sample_length`: +12 bytes
 
 ---
 
-## Ricerca RFC 3176 - sFlow Original
+## RFC 3176 - Original sFlow Research
 
-### Fonte: [RFC 3176 - InMon Corporation's sFlow](https://datatracker.ietf.org/doc/rfc3176/)
+### Source: [RFC 3176 - InMon Corporation's sFlow](https://datatracker.ietf.org/doc/rfc3176/)
 
-### Status RFC
+### RFC Status
 > "This RFC is labeled as 'Legacy' and was published before a formal source was recorded. It is not endorsed by the IETF and has no formal standing in the IETF standards process."
 
 ### AS Path Segment Types
@@ -186,34 +186,34 @@ struct extended_gateway {
 };
 ```
 
-### Differenze tra RFC 3176 e sFlow v5
-- sFlow v5 aggiunge il campo `nexthop` prima degli AS
-- sFlow v5 usa encoding più esplicito per i path segment
-- sFlow v5 aggiunge campi per communities e localpref
+### Differences Between RFC 3176 and sFlow v5
+- sFlow v5 adds the `nexthop` field before the AS fields
+- sFlow v5 uses more explicit encoding for path segments
+- sFlow v5 adds fields for communities and localpref
 
 ---
 
-## Analisi Implementazioni Esistenti
+## Existing Implementations Analysis
 
 ### 1. Google gopacket/layers/sflow.go
 
-**Fonte**: [github.com/google/gopacket/blob/master/layers/sflow.go](https://github.com/google/gopacket/blob/master/layers/sflow.go)
+**Source**: [github.com/google/gopacket/blob/master/layers/sflow.go](https://github.com/google/gopacket/blob/master/layers/sflow.go)
 
-**Approccio al parsing**:
+**Parsing approach**:
 ```go
-// DecodeFromBytes itera attraverso i sample
+// DecodeFromBytes iterates through samples
 for i := uint32(0); i < s.SampleCount; i++ {
-    // Switch su sample type
+    // Switch on sample type
     switch sampleType {
     case SFlowTypeFlowSample:
-        // Decodifica e avanza il puntatore
+        // Decode and advance pointer
     case SFlowTypeCounterSample:
-        // Decodifica e avanza il puntatore
+        // Decode and advance pointer
     }
 }
 ```
 
-**Gestione AS Path**:
+**AS Path handling**:
 ```go
 type SFlowExtendedGatewayFlowRecord struct {
     // ...
@@ -224,65 +224,65 @@ type SFlowExtendedGatewayFlowRecord struct {
 type SFlowASDestination struct {
     Type    SFlowASPathType  // AS_SET or AS_SEQUENCE
     Count   uint32
-    Members []uint32         // Array di ASN
+    Members []uint32         // Array of ASNs
 }
 ```
 
-**Nota**: gopacket è progettato solo per il parsing, non per la modifica/re-encoding.
+**Note**: gopacket is designed for parsing only, not for modification/re-encoding.
 
 ### 2. Cistern/sflow
 
-**Fonte**: [github.com/Cistern/sflow](https://github.com/Cistern/sflow)
+**Source**: [github.com/Cistern/sflow](https://github.com/Cistern/sflow)
 
-**Caratteristiche**:
-- Supporta sia decoding che encoding
-- Ha un `NewEncoder()` che scrive su `io.Writer`
-- Struttura round-trip: Decode → Modify → Encode
+**Characteristics**:
+- Supports both decoding and encoding
+- Has a `NewEncoder()` that writes to `io.Writer`
+- Round-trip structure: Decode → Modify → Encode
 
-**File encoder**:
+**Encoder file**:
 - `encoder.go` - Core encoding logic
-- `*_encode_test.go` - Test per encoding
+- `*_encode_test.go` - Encoding tests
 
-**Limitazione**: API non stabile ("API stability is not guaranteed")
+**Limitation**: API not stable ("API stability is not guaranteed")
 
 ### 3. Cloudflare goflow/goflow2
 
-**Fonte**: [github.com/netsampler/goflow2](https://github.com/netsampler/goflow2)
+**Source**: [github.com/netsampler/goflow2](https://github.com/netsampler/goflow2)
 
-**Architettura**:
+**Architecture**:
 ```
 Datagram → Decoder → Go Structs → Producer → Protobuf/Kafka
 ```
 
-**Nota importante**:
+**Important note**:
 > "sFlow is a stateless protocol which sends the full header of a packet with router information (interfaces, destination AS)"
 
-goflow2 non modifica i pacchetti sFlow, li converte in un formato interno.
+goflow2 doesn't modify sFlow packets, it converts them to an internal format.
 
 ### 4. pmacct
 
-**Fonte**: Analisi del codice sorgente pmacct
+**Source**: pmacct source code analysis
 
-**Approccio**: pmacct NON modifica i pacchetti sFlow. Invece:
-1. Riceve pacchetti sFlow
-2. Usa un BGP daemon interno per ottenere informazioni AS
-3. Arricchisce i dati a livello di collector (dopo il parsing)
+**Approach**: pmacct does NOT modify sFlow packets. Instead:
+1. Receives sFlow packets
+2. Uses an internal BGP daemon to get AS information
+3. Enriches data at collector level (after parsing)
 
 ```c
-// Da sflow.h di pmacct
+// From pmacct's sflow.h
 struct sflow_extended_gateway {
     uint32_t nexthop_type;
-    // ... campi
+    // ... fields
     uint32_t dst_as_path_len;
-    uint32_t *dst_as_path;  // Puntatore, non modifica il pacchetto originale
+    uint32_t *dst_as_path;  // Pointer, doesn't modify original packet
 };
 ```
 
 ### 5. VerizonDigital/vflow
 
-**Fonte**: [github.com/VerizonDigital/vflow](https://pkg.go.dev/github.com/VerizonDigital/vflow/sflow)
+**Source**: [github.com/VerizonDigital/vflow](https://pkg.go.dev/github.com/VerizonDigital/vflow/sflow)
 
-**Struttura FlowSample**:
+**FlowSample structure**:
 ```go
 type FlowSample struct {
     SequenceNo   uint32
@@ -299,92 +299,92 @@ type FlowSample struct {
 
 ---
 
-## Strategie di Fix Analizzate
+## Fix Strategies Analyzed
 
-### Strategia A: Rimuovere DstAS Enrichment
-**Pro**: Zero rischi, nessuna modifica di dimensione pacchetto
-**Contro**: Non risolve il problema DstAS=0 per traffico inbound
+### Strategy A: Remove DstAS Enrichment
+**Pros**: Zero risk, no packet size modification
+**Cons**: Doesn't solve the DstAS=0 problem for inbound traffic
 
-### Strategia B: Decode-Modify-Reencode
-**Approccio**: Usare Cistern/sflow per decodificare, modificare le struct Go, re-encodare.
+### Strategy B: Decode-Modify-Reencode
+**Approach**: Use Cistern/sflow to decode, modify Go structs, re-encode.
 
-**Pro**:
-- Più robusto
-- Non richiede tracking manuale degli offset
+**Pros**:
+- More robust
+- Doesn't require manual offset tracking
 
-**Contro**:
-- Aggiunge dipendenza esterna
-- API non stabile
-- Overhead di performance (doppio parsing)
-- Richiede implementazione completa di tutti i tipi di record
+**Cons**:
+- Adds external dependency
+- Unstable API
+- Performance overhead (double parsing)
+- Requires complete implementation of all record types
 
-### Strategia C: Cumulative Offset Tracking
-**Approccio**: Tracciare i byte inseriti e aggiustare tutti gli offset successivi.
+### Strategy C: Cumulative Offset Tracking
+**Approach**: Track inserted bytes and adjust all subsequent offsets.
 
 ```go
 cumulativeOffset := 0
 for i, sample := range datagram.Samples {
     adjustedOffset := sample.Offset + cumulativeOffset
-    // ... modifica ...
+    // ... modify ...
     if bytesInserted > 0 {
         cumulativeOffset += bytesInserted
     }
 }
 ```
 
-**Pro**: Flessibile
-**Contro**:
-- Codice complesso
-- Richiede passare stato attraverso le funzioni
-- Facile introdurre bug
+**Pros**: Flexible
+**Cons**:
+- Complex code
+- Requires passing state through functions
+- Easy to introduce bugs
 
-### Strategia D: Reverse Order Processing ✓ SCELTA
-**Approccio**: Processare i sample dall'ultimo al primo.
+### Strategy D: Reverse Order Processing ✓ CHOSEN
+**Approach**: Process samples from last to first.
 
-**Logica matematica**:
+**Mathematical logic**:
 ```
 Offset Sample[0] = 100
 Offset Sample[1] = 300
 Offset Sample[2] = 500
 
-Processo Sample[2] prima (offset 500):
-- Inserisco 12 byte a offset 500
-- Sample[0] offset 100 → VALIDO (100 < 500)
-- Sample[1] offset 300 → VALIDO (300 < 500)
+Process Sample[2] first (offset 500):
+- Insert 12 bytes at offset 500
+- Sample[0] offset 100 → VALID (100 < 500)
+- Sample[1] offset 300 → VALID (300 < 500)
 
-Processo Sample[1] (offset 300):
-- Inserisco 12 byte a offset 300
-- Sample[0] offset 100 → VALIDO (100 < 300)
+Process Sample[1] (offset 300):
+- Insert 12 bytes at offset 300
+- Sample[0] offset 100 → VALID (100 < 300)
 
-Processo Sample[0] (offset 100):
-- Inserisco 12 byte a offset 100
-- COMPLETATO
+Process Sample[0] (offset 100):
+- Insert 12 bytes at offset 100
+- COMPLETED
 ```
 
-**Pro**:
-- Nessuna dipendenza esterna
-- Codice minimale (1 riga cambiata)
-- Matematicamente corretto
-- Zero overhead di performance
+**Pros**:
+- No external dependencies
+- Minimal code change (1 line changed)
+- Mathematically correct
+- Zero performance overhead
 
-**Contro**: Nessuno identificato
+**Cons**: None identified
 
 ---
 
-## Soluzione Implementata
+## Implemented Solution
 
-### Codice Modificato
+### Modified Code
 
-**File**: `cmd/sflow-enricher/main.go`, funzione `enrichPacket()`
+**File**: `cmd/sflow-enricher/main.go`, function `enrichPacket()`
 
-**Prima** (iterazione forward):
+**Before** (forward iteration):
 ```go
 for _, sample := range datagram.Samples {
-    // ... processo sample ...
+    // ... process sample ...
 }
 ```
 
-**Dopo** (iterazione reverse):
+**After** (reverse iteration):
 ```go
 // CRITICAL: Process samples in REVERSE ORDER to handle packet resizing correctly.
 // When ModifyDstAS inserts 12 bytes into a sample, it shifts all subsequent data.
@@ -392,26 +392,26 @@ for _, sample := range datagram.Samples {
 // This is the correct approach for XDR variable-length data modification.
 for i := len(datagram.Samples) - 1; i >= 0; i-- {
     sample := datagram.Samples[i]
-    // ... processo sample ...
+    // ... process sample ...
 }
 ```
 
-### Perché Funziona
+### Why It Works
 
-1. **Invariante preservato**: Gli offset di sample[0..N-1] sono sempre validi quando processo sample[N]
+1. **Invariant preserved**: Offsets of sample[0..N-1] are always valid when processing sample[N]
 
-2. **Nessuna dipendenza tra sample**: Ogni sample contiene i propri flow record, non ci sono riferimenti cross-sample
+2. **No dependencies between samples**: Each sample contains its own flow records, there are no cross-sample references
 
-3. **XDR compliance**: L'inserimento di 12 byte (già allineato a 4 byte) non viola le regole XDR
+3. **XDR compliance**: Inserting 12 bytes (already 4-byte aligned) doesn't violate XDR rules
 
-4. **Aggiornamenti length corretti**: `ModifyDstAS()` aggiorna già:
+4. **Correct length updates**: `ModifyDstAS()` already updates:
    - `DstASPathLen`: 0 → 1
    - `record_length`: +12
    - `sample_length`: +12
 
 ---
 
-## Verifica e Test
+## Verification and Testing
 
 ### Test in Debug Mode
 
@@ -419,15 +419,15 @@ for i := len(datagram.Samples) - 1; i >= 0; i-- {
 /usr/local/bin/sflow-enricher -config /etc/sflow-enricher/config.yaml -debug
 ```
 
-### Output Verificato
+### Verified Output
 
-**SrcAS Enrichment** (traffico outbound):
+**SrcAS Enrichment** (outbound traffic):
 ```
 [DEBUG] Gateway AS values map[src_as:0 src_ip:185.54.80.30 ...]
 [DEBUG] Enriching SrcAS map[new_as:202032 old_as:0 rule:goline-ipv4 src_ip:185.54.80.30]
 ```
 
-**DstAS Enrichment** (traffico inbound):
+**DstAS Enrichment** (inbound traffic):
 ```
 [DEBUG] Gateway AS values map[dst_as:0 dst_as_path:[] dst_ip:185.54.80.24 ...]
 [DEBUG] Enriching DstAS map[dst_ip:185.54.80.24 new_as:202032 rule:goline-ipv4]
@@ -439,7 +439,7 @@ for i := len(datagram.Samples) - 1; i >= 0; i-- {
 [DEBUG] Enriching DstAS map[dst_ip:2a02:4460:1:1::22 new_as:202032 rule:goline-ipv6]
 ```
 
-### Metriche di Successo
+### Success Metrics
 
 ```json
 {
@@ -458,34 +458,34 @@ for i := len(datagram.Samples) - 1; i >= 0; i-- {
 
 - **Zero packet drop**
 - **100% enrichment rate**
-- **Entrambe le destinazioni healthy**
+- **Both destinations healthy**
 
 ---
 
-## Fonti e Riferimenti
+## Sources and References
 
-### Specifiche Ufficiali
+### Official Specifications
 1. [sFlow v5 Datagram Specification](https://sflow.org/SFLOW-DATAGRAM5.txt)
 2. [sFlow Version 5 Full Spec](https://sflow.org/sflow_version_5.txt)
 3. [RFC 4506 - XDR Encoding Standard](https://www.rfc-editor.org/rfc/rfc4506)
 4. [RFC 3176 - Original sFlow Specification](https://datatracker.ietf.org/doc/rfc3176/)
 
-### Implementazioni di Riferimento
+### Reference Implementations
 5. [Google gopacket sflow.go](https://github.com/google/gopacket/blob/master/layers/sflow.go)
 6. [Cistern/sflow - Go encoder/decoder](https://github.com/Cistern/sflow)
 7. [Cloudflare goflow2](https://github.com/netsampler/goflow2)
 8. [VerizonDigital vflow](https://github.com/VerizonDigital/vflow)
 
-### Documentazione Vendor
+### Vendor Documentation
 9. [InMon sFlow Agent v5](https://inmon.com/technology/InMon_Agentv5.pdf)
 10. [sFlow Wikipedia](https://en.wikipedia.org/wiki/SFlow)
 
 ---
 
-## Autore
+## Author
 
 **Paolo Caparrelli** - GOLINE SA
 **Email**: soc@goline.ch
-**Data**: 23/01/2026
+**Date**: 23/01/2026
 
 **Co-Authored-By**: Claude Opus 4.5 (Anthropic)
