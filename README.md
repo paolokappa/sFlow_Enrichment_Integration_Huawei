@@ -526,8 +526,7 @@ sflow-enricher/
 </p>
 
 <p align="center">
-  <strong>Author:</strong> Paolo Caparrelli<br/>
-  <strong>Co-Author:</strong> Claude Opus 4.5 (Anthropic)
+  <strong>Author:</strong> Paolo Caparrelli
 </p>
 
 <p align="center">
