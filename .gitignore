@@ -1,0 +1,26 @@
+# Binaries
+sflow-enricher
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Build directory
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test coverage
+*.out
+coverage.html
+
+# Local config (may contain secrets)
+config.local.yaml

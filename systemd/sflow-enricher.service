@@ -1,0 +1,30 @@
+[Unit]
+Description=sFlow Enricher Proxy
+Documentation=https://github.com/goline-sa/sflow-enricher
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sflow-enricher -config /etc/sflow-enricher/config.yaml
+Restart=always
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadOnlyPaths=/etc/sflow-enricher
+
+# Resource limits
+LimitNOFILE=65535
+MemoryMax=256M
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sflow-enricher
+
+[Install]
+WantedBy=multi-user.target
