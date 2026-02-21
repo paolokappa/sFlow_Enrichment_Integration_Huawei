@@ -10,10 +10,10 @@ cd /root/sFlow_Enrichment_Integration_Huawei/sflow-enricher
 # Install dependencies
 go mod download
 
-# Build
-make build
+# Build (enricher + monitor)
+make all
 
-# Install (binary + config + systemd)
+# Install (binaries + config + systemd)
 make install
 ```
 
@@ -21,7 +21,8 @@ make install
 
 | File | Path | Description |
 |------|------|-------------|
-| Binary | `/usr/local/bin/sflow-enricher` | Main executable |
+| Enricher | `/usr/local/bin/sflow-enricher` | Main enricher binary |
+| Monitor | `/usr/local/bin/sflow-monitor` | Dashboard monitor binary |
 | Config | `/etc/sflow-enricher/config.yaml` | Configuration file |
 | Systemd | `/etc/systemd/system/sflow-enricher.service` | Service unit |
 
@@ -74,6 +75,48 @@ kill -HUP $(pgrep sflow-enricher)
 - Listen address/port
 - HTTP address/port
 - Destinations
+
+---
+
+## sflow-monitor Dashboard
+
+The `sflow-monitor` tool provides a live ASCII dashboard for monitoring the enricher.
+
+### Usage
+
+```bash
+# Connect to local enricher (default http://127.0.0.1:8080)
+sflow-monitor
+
+# Custom URL and refresh interval
+sflow-monitor -url http://192.168.1.100:8080 -interval 5
+
+# No ANSI colors
+sflow-monitor -no-color
+
+# Version
+sflow-monitor -version
+```
+
+### Dashboard Sections
+
+| Section | Content |
+|---------|---------|
+| **Header** | Status, version, uptime, listen address, source IPs |
+| **Packet Flow** | In/Out/Drop rates (pps) with sparkline graphs |
+| **Bytes Flow** | In/Out rates (KB/s) with sparkline graphs |
+| **Enrichment** | Enriched/Dropped/Filtered percentage bars |
+| **Enrichment Rules** | Table with Name, Network, SetAS, Modifies (SrcAS + SrcPeerAS + DstAS + RouterAS) |
+| **Flow Diagram** | Visual [Source] -> [Enricher] -> [Destinations] with addresses |
+| **Destinations** | Table with health, packets sent, drops, errors |
+| **Totals** | Cumulative received/forwarded/enriched/dropped/bytes |
+
+The dashboard frame auto-sizes dynamically to the widest content at every refresh.
+
+### Requirements
+
+- The enricher must have `http.enabled: true` in config
+- The monitor connects to `/status` and `/health` endpoints
 
 ---
 
@@ -203,7 +246,7 @@ journalctl -u sflow-enricher -n 50 --no-pager
    ```bash
    ufw status | grep 6343
    # Add rule if missing:
-   ufw allow from 185.54.80.2 to any port 6343 proto udp
+   ufw allow from 10.0.0.1 to any port 6343 proto udp
    ```
 
 2. **Verify source is sending:**
@@ -237,12 +280,12 @@ journalctl -u sflow-enricher -n 50 --no-pager
 
 1. **Check connectivity:**
    ```bash
-   nc -vzu 162.159.65.1 6343
+   nc -vzu 198.51.100.1 6343
    ```
 
 2. **Check DNS resolution:**
    ```bash
-   dig +short 162.159.65.1
+   dig +short 198.51.100.1
    ```
 
 3. **Check firewall outbound:**
@@ -292,6 +335,7 @@ systemctl reload sflow-enricher
 tar -czvf sflow-enricher-backup.tar.gz \
     /etc/sflow-enricher/ \
     /usr/local/bin/sflow-enricher \
+    /usr/local/bin/sflow-monitor \
     /etc/systemd/system/sflow-enricher.service
 ```
 
@@ -306,16 +350,18 @@ cd /root/sFlow_Enrichment_Integration_Huawei/sflow-enricher
 git pull
 
 # Build new version
-make build
+make all
 
 # Check version
 ./build/sflow-enricher -version
+./build/sflow-monitor -version
 
 # Stop service
 systemctl stop sflow-enricher
 
-# Install new binary
+# Install new binaries
 cp build/sflow-enricher /usr/local/bin/
+cp build/sflow-monitor /usr/local/bin/
 
 # Start service
 systemctl start sflow-enricher

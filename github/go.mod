@@ -1,4 +1,4 @@
-module sflow-asn-enricher
+module sflow-enricher
 
 go 1.21
 

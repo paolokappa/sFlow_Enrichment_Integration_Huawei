@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,19 +11,20 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
-	"sflow-asn-enricher/internal/config"
-	"sflow-asn-enricher/internal/sflow"
+	"sflow-enricher/internal/config"
+	"sflow-enricher/internal/sflow"
 )
 
 const (
 	maxPacketSize = 65535
 	bufferPoolSize = 1000
-	version = "2.0.0"
+	version = "2.2.1"
 )
 
 // Stats holds packet statistics
@@ -68,6 +70,21 @@ var (
 	debugMode   bool
 	logJSON     bool
 	bufferPool  sync.Pool
+
+	// Telegram HTTP client with timeout and optional IPv6 fallback
+	telegramClient *http.Client
+
+	// Rate limiting for destination flapping alerts
+	alertCooldowns   map[string]time.Time
+	alertCooldownsMu sync.Mutex
+
+	// Drop rate monitoring: previous stats snapshot
+	prevReceived uint64
+	prevDropped  uint64
+
+	// IPv6 fallback degradation tracking
+	lastIPv6Alert time.Time
+	ipv6AlertMu   sync.Mutex
 )
 
 func init() {
@@ -79,6 +96,65 @@ func init() {
 	}
 }
 
+// sdNotify sends a notification to systemd via the notify socket
+func sdNotify(state string) {
+	socketPath := os.Getenv("NOTIFY_SOCKET")
+	if socketPath == "" {
+		return // Not running under systemd
+	}
+
+	conn, err := net.Dial("unixgram", socketPath)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	conn.Write([]byte(state))
+}
+
+// sdReady notifies systemd that the service is ready
+func sdReady() {
+	sdNotify("READY=1")
+	logInfo("Systemd notified: READY", nil)
+}
+
+// sdWatchdog sends the heartbeat
+func sdWatchdog() {
+	sdNotify("WATCHDOG=1")
+}
+
+// sdStopping notifies the start of shutdown
+func sdStopping() {
+	sdNotify("STOPPING=1")
+}
+
+// startWatchdog starts the systemd watchdog heartbeat goroutine
+func startWatchdog() {
+	// Read interval from environment
+	watchdogUSec := os.Getenv("WATCHDOG_USEC")
+	if watchdogUSec == "" {
+		return // Watchdog not configured
+	}
+
+	usec, err := strconv.ParseInt(watchdogUSec, 10, 64)
+	if err != nil || usec <= 0 {
+		return
+	}
+
+	// Notify at half the interval (best practice)
+	interval := time.Duration(usec/2) * time.Microsecond
+	logInfo("Watchdog started", map[string]interface{}{
+		"interval": interval.String(),
+	})
+
+	ticker := time.NewTicker(interval)
+	go func() {
+		for range ticker.C {
+			sdWatchdog()
+		}
+	}()
+}
+
 func main() {
 	flag.StringVar(&configPath, "config", "/etc/sflow-enricher/config.yaml", "Path to config file")
 	flag.BoolVar(&debugMode, "debug", false, "Enable debug logging")
@@ -86,7 +162,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("sflow-asn-enricher version %s\n", version)
+		fmt.Printf("sflow-enricher version %s\n", version)
 		os.Exit(0)
 	}
 
@@ -99,6 +175,8 @@ func main() {
 
 	logJSON = cfg.Logging.Format == "json"
 	stats.StartTime = time.Now()
+	alertCooldowns = make(map[string]time.Time)
+	initTelegramClient()
 
 	logInfo("sFlow ASN Enricher starting", map[string]interface{}{
 		"version": version,
@@ -153,8 +231,21 @@ func main() {
 	// Start stats reporter
 	go statsReporter(cfg.Logging.StatsInterval)
 
+	// Notify systemd that service is ready
+	sdReady()
+	startWatchdog()
+
 	// Send startup notification
-	sendTelegramAlert("startup", fmt.Sprintf("sFlow ASN Enricher started on %s", cfg.ListenAddr()))
+	startupDetails := fmt.Sprintf("Service started on `%s`\n📦 Version: `%s`\n📋 Rules:",
+		cfg.ListenAddr(), version)
+	for _, rule := range cfg.Enrichment.Rules {
+		startupDetails += fmt.Sprintf("\n   • `%s` → AS%d", rule.Name, rule.SetAS)
+	}
+	startupDetails += "\n🎯 Destinations:"
+	for _, dest := range destinations {
+		startupDetails += fmt.Sprintf("\n   • `%s` (%s)", dest.Config.Name, dest.Stats.Address)
+	}
+	sendTelegramAlert("startup", startupDetails)
 
 	// Handle signals
 	sigChan := make(chan os.Signal, 1)
@@ -178,13 +269,40 @@ func main() {
 			if err := cfg.Reload(configPath); err != nil {
 				logError("Failed to reload config", err, nil)
 			} else {
+				initTelegramClient()
 				logInfo("Configuration reloaded", map[string]interface{}{
 					"rules_count": len(cfg.Enrichment.Rules),
 				})
 			}
 		case syscall.SIGINT, syscall.SIGTERM:
+			sdStopping()
 			logInfo("Received shutdown signal", map[string]interface{}{"signal": sig.String()})
-			sendTelegramAlert("shutdown", "sFlow ASN Enricher shutting down")
+
+			// Build detailed shutdown message
+			destStats := ""
+			for _, dest := range destinations {
+				statusIcon := "✅"
+				if !dest.Healthy.Load() {
+					statusIcon = "❌"
+				}
+				destStats += fmt.Sprintf("\n   %s `%s`: %d pkts", statusIcon, dest.Config.Name,
+					atomic.LoadUint64(&dest.Stats.PacketsSent))
+			}
+
+			shutdownDetails := fmt.Sprintf("Service shutting down\n"+
+				"⏱️ Uptime: `%s`\n"+
+				"📥 Received: `%d`\n"+
+				"✅ Enriched: `%d`\n"+
+				"❌ Dropped: `%d`\n"+
+				"🎯 Destinations:%s",
+				time.Since(stats.StartTime).Round(time.Second),
+				atomic.LoadUint64(&stats.PacketsReceived),
+				atomic.LoadUint64(&stats.PacketsEnriched),
+				atomic.LoadUint64(&stats.PacketsDropped),
+				destStats)
+
+			// Blocking call to ensure Telegram notification is sent before shutdown
+			sendTelegramAlertWithWait("shutdown", shutdownDetails, true)
 			close(stopChan)
 			listener.Close()
 			for _, dest := range destinations {
@@ -307,16 +425,20 @@ func processPackets(listener *net.UDPConn, stopChan chan struct{}) {
 		bufferPool.Put(bufPtr)
 
 		// Process and enrich the packet
-		enriched := enrichPacket(packet, remoteAddr)
+		packet, enriched := enrichPacket(packet, remoteAddr)
 
-		// Forward to all destinations
+		// Forward to all destinations (use potentially resized packet)
 		for _, dest := range destinations {
-			sendToDestination(dest, packet, n, enriched)
+			sendToDestination(dest, packet, len(packet))
+		}
+
+		if enriched {
+			atomic.AddUint64(&stats.PacketsEnriched, 1)
 		}
 	}
 }
 
-func sendToDestination(dest *Destination, packet []byte, n int, enriched bool) {
+func sendToDestination(dest *Destination, packet []byte, n int) {
 	// Check if destination is healthy, use failover if not
 	targetDest := dest
 	if !dest.Healthy.Load() && dest.FailoverDst != nil && dest.FailoverDst.Healthy.Load() {
@@ -333,8 +455,10 @@ func sendToDestination(dest *Destination, packet []byte, n int, enriched bool) {
 	if err != nil {
 		atomic.AddUint64(&targetDest.Stats.PacketsDropped, 1)
 		atomic.AddUint64(&stats.PacketsDropped, 1)
+		now := time.Now()
 		targetDest.mu.Lock()
 		targetDest.Stats.LastError = err.Error()
+		targetDest.Stats.LastCheck = now
 		targetDest.mu.Unlock()
 		if debugMode {
 			logError("Forward error", err, map[string]interface{}{
@@ -347,13 +471,9 @@ func sendToDestination(dest *Destination, packet []byte, n int, enriched bool) {
 		atomic.AddUint64(&stats.PacketsForwarded, 1)
 		atomic.AddUint64(&stats.BytesForwarded, uint64(n))
 	}
-
-	if enriched {
-		atomic.AddUint64(&stats.PacketsEnriched, 1)
-	}
 }
 
-func enrichPacket(packet []byte, remoteAddr *net.UDPAddr) bool {
+func enrichPacket(packet []byte, remoteAddr *net.UDPAddr) ([]byte, bool) {
 	datagram, err := sflow.Parse(packet)
 	if err != nil {
 		if debugMode {
@@ -361,13 +481,18 @@ func enrichPacket(packet []byte, remoteAddr *net.UDPAddr) bool {
 				"source": remoteAddr.String(),
 			})
 		}
-		return false
+		return packet, false
 	}
 
 	enriched := false
 	rules := cfg.GetEnrichmentRules()
 
-	for _, sample := range datagram.Samples {
+	// CRITICAL: Process samples in REVERSE ORDER to handle packet resizing correctly.
+	// When ModifyDstAS inserts 12 bytes into a sample, it shifts all subsequent data.
+	// By processing from last to first, we ensure earlier sample offsets remain valid.
+	// This is the correct approach for XDR variable-length data modification.
+	for i := len(datagram.Samples) - 1; i >= 0; i-- {
+		sample := datagram.Samples[i]
 		if sample.Enterprise != 0 {
 			continue
 		}
@@ -390,11 +515,11 @@ func enrichPacket(packet []byte, remoteAddr *net.UDPAddr) bool {
 			continue
 		}
 
-		// Find source IP from raw packet header
-		var srcIP net.IP
+		// Find source and destination IP from raw packet header
+		var srcIP, dstIP net.IP
 		for _, record := range flowSample.Records {
 			if record.Enterprise == 0 && record.Format == sflow.FlowRecordRawPacketHeader {
-				srcIP = sflow.GetSrcIPFromRawPacket(record.Data)
+				srcIP, dstIP = sflow.GetSrcDstIPFromRawPacket(record.Data)
 				break
 			}
 		}
@@ -413,9 +538,9 @@ func enrichPacket(packet []byte, remoteAddr *net.UDPAddr) bool {
 				continue
 			}
 
-			// Check enrichment rules
+			// Check enrichment rules for SrcAS (outbound traffic)
 			for _, rule := range rules {
-				// Check if we should apply this rule
+				// Check if we should apply this rule for SrcAS
 				shouldApply := false
 				if rule.Overwrite {
 					// Always apply if IP matches
@@ -427,21 +552,85 @@ func enrichPacket(packet []byte, remoteAddr *net.UDPAddr) bool {
 
 				if shouldApply {
 					if debugMode {
-						logDebug("Enriching packet", map[string]interface{}{
-							"src_ip":   srcIP.String(),
-							"old_as":   eg.SrcAS,
-							"new_as":   rule.SetAS,
-							"rule":     rule.Name,
+						logDebug("Enriching SrcAS", map[string]interface{}{
+							"src_ip": srcIP.String(),
+							"old_as": eg.SrcAS,
+							"new_as": rule.SetAS,
+							"rule":   rule.Name,
 						})
 					}
 					sflow.ModifySrcAS(packet, sample.Offset, record.Offset, rule.SetAS)
 					enriched = true
+
+					// SrcPeerAS: for locally-originated traffic, the "source peer" is the router itself
+					if eg.SrcPeerAS == 0 {
+						if debugMode {
+							logDebug("Enriching SrcPeerAS", map[string]interface{}{
+								"src_ip":          srcIP.String(),
+								"old_src_peer_as": eg.SrcPeerAS,
+								"new_src_peer_as": rule.SetAS,
+								"rule":            rule.Name,
+							})
+						}
+						sflow.ModifySrcPeerAS(packet, sample.Offset, record.Offset, rule.SetAS)
+					}
+
+					// RouterAS: only set if missing (0). Don't overwrite non-zero values
+					// as they may contain valid data from the router's BGP table.
+					if eg.AS == 0 {
+						if debugMode {
+							logDebug("Enriching RouterAS", map[string]interface{}{
+								"old_router_as": eg.AS,
+								"new_router_as": rule.SetAS,
+								"rule":          rule.Name,
+							})
+						}
+						sflow.ModifyRouterAS(packet, sample.Offset, record.Offset, rule.SetAS)
+					}
+					break // Only apply first matching rule for SrcAS
+				}
+			}
+
+			// Check enrichment rules for DstAS (inbound traffic)
+			// Only enrich if DstASPath is empty (DstASPathLen == 0)
+			if eg.DstASPathLen == 0 {
+				for _, rule := range rules {
+					// Check if destination IP matches the rule's network
+					if dstIP != nil && rule.IPNet.Contains(dstIP) {
+						if debugMode {
+							logDebug("Enriching DstAS", map[string]interface{}{
+								"dst_ip": dstIP.String(),
+								"new_as": rule.SetAS,
+								"rule":   rule.Name,
+							})
+						}
+						// ModifyDstAS returns a new packet (resized) and success flag
+						newPacket, ok := sflow.ModifyDstAS(packet, sample.Offset, record.Offset, rule.SetAS)
+						if ok {
+							packet = newPacket
+							enriched = true
+						}
+
+						// RouterAS: set to router's own AS if missing (inbound has router_as=0)
+						if eg.AS == 0 {
+							if debugMode {
+								logDebug("Enriching RouterAS (inbound)", map[string]interface{}{
+									"old_router_as": eg.AS,
+									"new_router_as": rule.SetAS,
+									"rule":          rule.Name,
+								})
+							}
+							sflow.ModifyRouterAS(packet, sample.Offset, record.Offset, rule.SetAS)
+							enriched = true
+						}
+						break // Only apply first matching rule for DstAS
+					}
 				}
 			}
 		}
 	}
 
-	return enriched
+	return packet, enriched
 }
 
 func healthChecker() {
@@ -474,7 +663,8 @@ func checkDestinationHealth(dest *Destination) {
 			logError("Destination unhealthy", err, map[string]interface{}{
 				"destination": dest.Config.Name,
 			})
-			sendTelegramAlert("destination_down", fmt.Sprintf("Destination %s is DOWN: %v", dest.Config.Name, err))
+			sendRateLimitedAlert("destination_down", dest.Config.Name,
+				fmt.Sprintf("Destination `%s` is *DOWN*: %v", dest.Config.Name, err))
 		}
 	} else {
 		conn.Close()
@@ -489,7 +679,8 @@ func checkDestinationHealth(dest *Destination) {
 			logInfo("Destination healthy", map[string]interface{}{
 				"destination": dest.Config.Name,
 			})
-			sendTelegramAlert("destination_down", fmt.Sprintf("Destination %s is UP", dest.Config.Name))
+			sendRateLimitedAlert("destination_up", dest.Config.Name,
+				fmt.Sprintf("Destination `%s` is *UP*", dest.Config.Name))
 		}
 	}
 }
@@ -563,9 +754,25 @@ func prometheusMetricsHandler(w http.ResponseWriter, r *http.Request) {
 func statusHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
+	// Build enrichment rules summary
+	rules := cfg.GetEnrichmentRules()
+	rulesList := make([]map[string]interface{}, len(rules))
+	for i, r := range rules {
+		rulesList[i] = map[string]interface{}{
+			"name":      r.Name,
+			"network":   r.Network,
+			"match_as":  r.MatchAS,
+			"set_as":    r.SetAS,
+			"overwrite": r.Overwrite,
+		}
+	}
+
 	status := map[string]interface{}{
-		"version": version,
-		"uptime":  time.Since(stats.StartTime).String(),
+		"version":        version,
+		"uptime":         time.Since(stats.StartTime).String(),
+		"listen_address": cfg.ListenAddr(),
+		"whitelist_sources": cfg.Security.WhitelistSources,
+		"enrichment_rules":  rulesList,
 		"stats": map[string]uint64{
 			"packets_received":  atomic.LoadUint64(&stats.PacketsReceived),
 			"packets_forwarded": atomic.LoadUint64(&stats.PacketsForwarded),
@@ -616,7 +823,124 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // Telegram notifications
+
+// initTelegramClient creates the HTTP client for Telegram with timeout and optional IPv6 fallback
+func initTelegramClient() {
+	timeout := time.Duration(cfg.Telegram.HTTPTimeout) * time.Second
+
+	if cfg.Telegram.IPv6Fallback {
+		telegramClient = &http.Client{
+			Timeout: timeout,
+			Transport: &http.Transport{
+				DialContext:         ipv6FallbackDialer,
+				TLSHandshakeTimeout: 10 * time.Second,
+				IdleConnTimeout:     90 * time.Second,
+				MaxIdleConns:        2,
+			},
+		}
+		logInfo("Telegram client initialized with IPv6 fallback", map[string]interface{}{
+			"timeout": timeout.String(),
+		})
+	} else {
+		telegramClient = &http.Client{
+			Timeout: timeout,
+		}
+	}
+}
+
+// ipv6FallbackDialer tries IPv6 first, falls back to IPv4 if it fails
+func ipv6FallbackDialer(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+
+	// Try IPv6 first
+	conn, err := dialer.DialContext(ctx, "tcp6", addr)
+	if err == nil {
+		return conn, nil
+	}
+
+	logInfo("IPv6 connection failed, falling back to IPv4", map[string]interface{}{
+		"address": addr,
+		"error":   err.Error(),
+	})
+
+	// Send degradation alert (max 1 per hour)
+	ipv6AlertMu.Lock()
+	shouldAlert := time.Since(lastIPv6Alert) > time.Hour
+	if shouldAlert {
+		lastIPv6Alert = time.Now()
+	}
+	ipv6AlertMu.Unlock()
+
+	if shouldAlert {
+		go sendIPv6DegradationAlert()
+	}
+
+	// Fallback to IPv4
+	return dialer.DialContext(ctx, "tcp4", addr)
+}
+
+// sendIPv6DegradationAlert sends a one-off alert via IPv4-only client (avoids recursion)
+func sendIPv6DegradationAlert() {
+	hostname, _ := os.Hostname()
+	msg := fmt.Sprintf(
+		"⚠️ *sFlow ASN Enricher*\n"+
+			"━━━━━━━━━━━━━━━━━━━━━\n"+
+			"📍 *Host:* `%s`\n"+
+			"🏷️ *Event:* `ipv6_degraded`\n"+
+			"💬 *Details:* IPv6 connectivity to Telegram API failed, using IPv4 fallback\n"+
+			"🕐 *Time:* `%s`",
+		hostname, time.Now().Format("02/01/2006 15:04:05"))
+
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", cfg.Telegram.BotToken)
+	payload := map[string]interface{}{
+		"chat_id":    cfg.Telegram.ChatID,
+		"text":       msg,
+		"parse_mode": "Markdown",
+	}
+	jsonPayload, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+
+	// Use a separate IPv4-only client to avoid recursion through ipv6FallbackDialer
+	ipv4Client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := ipv4Client.Post(apiURL, "application/json", bytes.NewBuffer(jsonPayload))
+	if err != nil {
+		logError("Failed to send IPv6 degradation alert", err, nil)
+		return
+	}
+	resp.Body.Close()
+}
+
+// sendRateLimitedAlert sends an alert only if cooldown has elapsed for the given key
+func sendRateLimitedAlert(alertType, key, message string) {
+	cooldownKey := alertType + ":" + key
+	cooldownDuration := time.Duration(cfg.Telegram.FlapCooldown) * time.Second
+
+	alertCooldownsMu.Lock()
+	lastSent, exists := alertCooldowns[cooldownKey]
+	now := time.Now()
+	if exists && now.Sub(lastSent) < cooldownDuration {
+		remaining := (cooldownDuration - now.Sub(lastSent)).Round(time.Second)
+		alertCooldownsMu.Unlock()
+		logInfo("Telegram alert suppressed (cooldown)", map[string]interface{}{
+			"type":          alertType,
+			"key":           key,
+			"cooldown_left": remaining.String(),
+		})
+		return
+	}
+	alertCooldowns[cooldownKey] = now
+	alertCooldownsMu.Unlock()
+
+	sendTelegramAlert(alertType, message)
+}
+
 func sendTelegramAlert(alertType, message string) {
+	sendTelegramAlertWithWait(alertType, message, false)
+}
+
+func sendTelegramAlertWithWait(alertType, message string, blocking bool) {
 	if !cfg.Telegram.Enabled {
 		return
 	}
@@ -633,12 +957,42 @@ func sendTelegramAlert(alertType, message string) {
 		return
 	}
 
-	go func() {
-		hostname, _ := os.Hostname()
-		fullMessage := fmt.Sprintf("🔔 *sFlow ASN Enricher Alert*\n\n*Host:* `%s`\n*Type:* `%s`\n*Message:* %s\n*Time:* %s",
-			hostname, alertType, message, time.Now().Format("2006-01-02 15:04:05"))
+	logInfo("Sending Telegram notification", map[string]interface{}{
+		"type": alertType,
+	})
 
-		url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", cfg.Telegram.BotToken)
+	doSend := func() {
+		hostname, _ := os.Hostname()
+
+		// Icon based on alert type
+		icon := "ℹ️"
+		switch alertType {
+		case "startup":
+			icon = "🟢"
+		case "shutdown":
+			icon = "🔴"
+		case "destination_down":
+			icon = "🔻"
+		case "destination_up":
+			icon = "🔺"
+		case "high_drop_rate":
+			icon = "📉"
+		}
+
+		// Message format with European date DD/MM/YYYY
+		fullMessage := fmt.Sprintf(
+			"%s *sFlow ASN Enricher*\n"+
+				"━━━━━━━━━━━━━━━━━━━━━\n"+
+				"📍 *Host:* `%s`\n"+
+				"🏷️ *Event:* `%s`\n"+
+				"💬 *Details:* %s\n"+
+				"🕐 *Time:* `%s`",
+			icon, hostname, alertType, message,
+			time.Now().Format("02/01/2006 15:04:05"))
+
+		apiURL := fmt.Sprintf(
+			"https://api.telegram.org/bot%s/sendMessage",
+			cfg.Telegram.BotToken)
 
 		payload := map[string]interface{}{
 			"chat_id":    cfg.Telegram.ChatID,
@@ -646,9 +1000,32 @@ func sendTelegramAlert(alertType, message string) {
 			"parse_mode": "Markdown",
 		}
 
-		jsonPayload, _ := json.Marshal(payload)
+		jsonPayload, err := json.Marshal(payload)
+		if err != nil {
+			logError("Failed to marshal Telegram payload", err, nil)
+			return
+		}
 
-		resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonPayload))
+		// Use context with timeout: 10s for blocking shutdown, configured timeout otherwise
+		var ctx context.Context
+		var cancel context.CancelFunc
+		if blocking {
+			ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+		} else {
+			ctx, cancel = context.WithTimeout(context.Background(),
+				time.Duration(cfg.Telegram.HTTPTimeout)*time.Second)
+		}
+		defer cancel()
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL,
+			bytes.NewBuffer(jsonPayload))
+		if err != nil {
+			logError("Failed to create Telegram request", err, nil)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := telegramClient.Do(req)
 		if err != nil {
 			logError("Failed to send Telegram alert", err, nil)
 			return
@@ -656,9 +1033,17 @@ func sendTelegramAlert(alertType, message string) {
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			logError("Telegram API error", fmt.Errorf("status code: %d", resp.StatusCode), nil)
+			logError("Telegram API error",
+				fmt.Errorf("status code: %d", resp.StatusCode), nil)
 		}
-	}()
+	}
+
+	// Blocking vs async
+	if blocking {
+		doSend()
+	} else {
+		go doSend()
+	}
 }
 
 // Logging functions
@@ -708,11 +1093,54 @@ func statsReporter(intervalSeconds int) {
 		intervalSeconds = 60
 	}
 
+	// Initialize previous snapshot for drop rate calculation
+	prevReceived = atomic.LoadUint64(&stats.PacketsReceived)
+	prevDropped = atomic.LoadUint64(&stats.PacketsDropped)
+
 	ticker := time.NewTicker(time.Duration(intervalSeconds) * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
 		printStats()
+		checkDropRate()
+	}
+}
+
+func checkDropRate() {
+	curReceived := atomic.LoadUint64(&stats.PacketsReceived)
+	curDropped := atomic.LoadUint64(&stats.PacketsDropped)
+
+	// Calculate delta since last check
+	deltaReceived := curReceived - prevReceived
+	deltaDropped := curDropped - prevDropped
+
+	// Update snapshot for next interval
+	prevReceived = curReceived
+	prevDropped = curDropped
+
+	// Need a minimum number of packets to avoid false positives
+	if deltaReceived < 100 {
+		return
+	}
+
+	dropRate := float64(deltaDropped) / float64(deltaReceived) * 100.0
+
+	if dropRate >= cfg.Telegram.DropRateThreshold {
+		logError("High drop rate detected", nil, map[string]interface{}{
+			"drop_rate": fmt.Sprintf("%.1f%%", dropRate),
+			"threshold": fmt.Sprintf("%.1f%%", cfg.Telegram.DropRateThreshold),
+			"received":  deltaReceived,
+			"dropped":   deltaDropped,
+		})
+
+		msg := fmt.Sprintf("Drop rate `%.1f%%` exceeds threshold `%.1f%%`\n"+
+			"📊 Interval: `%d` received, `%d` dropped\n"+
+			"📈 Total: `%d` received, `%d` dropped",
+			dropRate, cfg.Telegram.DropRateThreshold,
+			deltaReceived, deltaDropped,
+			curReceived, curDropped)
+
+		sendRateLimitedAlert("high_drop_rate", "global", msg)
 	}
 }
 

@@ -5,10 +5,12 @@ After=network.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
 ExecStart=/usr/local/bin/sflow-enricher -config /etc/sflow-enricher/config.yaml
 Restart=always
 RestartSec=5
+WatchdogSec=30
+TimeoutStopSec=30
 
 # Security hardening
 NoNewPrivileges=yes

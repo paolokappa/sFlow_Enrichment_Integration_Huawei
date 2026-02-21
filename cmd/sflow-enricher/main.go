@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -23,7 +24,7 @@ import (
 const (
 	maxPacketSize = 65535
 	bufferPoolSize = 1000
-	version = "2.0.0"
+	version = "2.2.1"
 )
 
 // Stats holds packet statistics
@@ -69,6 +70,21 @@ var (
 	debugMode   bool
 	logJSON     bool
 	bufferPool  sync.Pool
+
+	// Telegram HTTP client with timeout and optional IPv6 fallback
+	telegramClient *http.Client
+
+	// Rate limiting for destination flapping alerts
+	alertCooldowns   map[string]time.Time
+	alertCooldownsMu sync.Mutex
+
+	// Drop rate monitoring: previous stats snapshot
+	prevReceived uint64
+	prevDropped  uint64
+
+	// IPv6 fallback degradation tracking
+	lastIPv6Alert time.Time
+	ipv6AlertMu   sync.Mutex
 )
 
 func init() {
@@ -159,6 +175,8 @@ func main() {
 
 	logJSON = cfg.Logging.Format == "json"
 	stats.StartTime = time.Now()
+	alertCooldowns = make(map[string]time.Time)
+	initTelegramClient()
 
 	logInfo("sFlow ASN Enricher starting", map[string]interface{}{
 		"version": version,
@@ -251,6 +269,7 @@ func main() {
 			if err := cfg.Reload(configPath); err != nil {
 				logError("Failed to reload config", err, nil)
 			} else {
+				initTelegramClient()
 				logInfo("Configuration reloaded", map[string]interface{}{
 					"rules_count": len(cfg.Enrichment.Rules),
 				})
@@ -410,12 +429,16 @@ func processPackets(listener *net.UDPConn, stopChan chan struct{}) {
 
 		// Forward to all destinations (use potentially resized packet)
 		for _, dest := range destinations {
-			sendToDestination(dest, packet, len(packet), enriched)
+			sendToDestination(dest, packet, len(packet))
+		}
+
+		if enriched {
+			atomic.AddUint64(&stats.PacketsEnriched, 1)
 		}
 	}
 }
 
-func sendToDestination(dest *Destination, packet []byte, n int, enriched bool) {
+func sendToDestination(dest *Destination, packet []byte, n int) {
 	// Check if destination is healthy, use failover if not
 	targetDest := dest
 	if !dest.Healthy.Load() && dest.FailoverDst != nil && dest.FailoverDst.Healthy.Load() {
@@ -432,8 +455,10 @@ func sendToDestination(dest *Destination, packet []byte, n int, enriched bool) {
 	if err != nil {
 		atomic.AddUint64(&targetDest.Stats.PacketsDropped, 1)
 		atomic.AddUint64(&stats.PacketsDropped, 1)
+		now := time.Now()
 		targetDest.mu.Lock()
 		targetDest.Stats.LastError = err.Error()
+		targetDest.Stats.LastCheck = now
 		targetDest.mu.Unlock()
 		if debugMode {
 			logError("Forward error", err, map[string]interface{}{
@@ -445,10 +470,6 @@ func sendToDestination(dest *Destination, packet []byte, n int, enriched bool) {
 		atomic.AddUint64(&targetDest.Stats.BytesSent, uint64(n))
 		atomic.AddUint64(&stats.PacketsForwarded, 1)
 		atomic.AddUint64(&stats.BytesForwarded, uint64(n))
-	}
-
-	if enriched {
-		atomic.AddUint64(&stats.PacketsEnriched, 1)
 	}
 }
 
@@ -540,6 +561,33 @@ func enrichPacket(packet []byte, remoteAddr *net.UDPAddr) ([]byte, bool) {
 					}
 					sflow.ModifySrcAS(packet, sample.Offset, record.Offset, rule.SetAS)
 					enriched = true
+
+					// SrcPeerAS: for locally-originated traffic, the "source peer" is the router itself
+					if eg.SrcPeerAS == 0 {
+						if debugMode {
+							logDebug("Enriching SrcPeerAS", map[string]interface{}{
+								"src_ip":          srcIP.String(),
+								"old_src_peer_as": eg.SrcPeerAS,
+								"new_src_peer_as": rule.SetAS,
+								"rule":            rule.Name,
+							})
+						}
+						sflow.ModifySrcPeerAS(packet, sample.Offset, record.Offset, rule.SetAS)
+					}
+
+					// RouterAS: only set if missing (0). Don't overwrite non-zero values
+					// as they may contain valid data from the router's BGP table.
+					if eg.AS == 0 {
+						if debugMode {
+							logDebug("Enriching RouterAS", map[string]interface{}{
+								"old_router_as": eg.AS,
+								"new_router_as": rule.SetAS,
+								"rule":          rule.Name,
+							})
+						}
+						sflow.ModifyRouterAS(packet, sample.Offset, record.Offset, rule.SetAS)
+					}
+					break // Only apply first matching rule for SrcAS
 				}
 			}
 
@@ -560,6 +608,19 @@ func enrichPacket(packet []byte, remoteAddr *net.UDPAddr) ([]byte, bool) {
 						newPacket, ok := sflow.ModifyDstAS(packet, sample.Offset, record.Offset, rule.SetAS)
 						if ok {
 							packet = newPacket
+							enriched = true
+						}
+
+						// RouterAS: set to router's own AS if missing (inbound has router_as=0)
+						if eg.AS == 0 {
+							if debugMode {
+								logDebug("Enriching RouterAS (inbound)", map[string]interface{}{
+									"old_router_as": eg.AS,
+									"new_router_as": rule.SetAS,
+									"rule":          rule.Name,
+								})
+							}
+							sflow.ModifyRouterAS(packet, sample.Offset, record.Offset, rule.SetAS)
 							enriched = true
 						}
 						break // Only apply first matching rule for DstAS
@@ -602,7 +663,8 @@ func checkDestinationHealth(dest *Destination) {
 			logError("Destination unhealthy", err, map[string]interface{}{
 				"destination": dest.Config.Name,
 			})
-			sendTelegramAlert("destination_down", fmt.Sprintf("Destination %s is DOWN: %v", dest.Config.Name, err))
+			sendRateLimitedAlert("destination_down", dest.Config.Name,
+				fmt.Sprintf("Destination `%s` is *DOWN*: %v", dest.Config.Name, err))
 		}
 	} else {
 		conn.Close()
@@ -617,7 +679,8 @@ func checkDestinationHealth(dest *Destination) {
 			logInfo("Destination healthy", map[string]interface{}{
 				"destination": dest.Config.Name,
 			})
-			sendTelegramAlert("destination_down", fmt.Sprintf("Destination %s is UP", dest.Config.Name))
+			sendRateLimitedAlert("destination_up", dest.Config.Name,
+				fmt.Sprintf("Destination `%s` is *UP*", dest.Config.Name))
 		}
 	}
 }
@@ -691,9 +754,25 @@ func prometheusMetricsHandler(w http.ResponseWriter, r *http.Request) {
 func statusHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
+	// Build enrichment rules summary
+	rules := cfg.GetEnrichmentRules()
+	rulesList := make([]map[string]interface{}, len(rules))
+	for i, r := range rules {
+		rulesList[i] = map[string]interface{}{
+			"name":      r.Name,
+			"network":   r.Network,
+			"match_as":  r.MatchAS,
+			"set_as":    r.SetAS,
+			"overwrite": r.Overwrite,
+		}
+	}
+
 	status := map[string]interface{}{
-		"version": version,
-		"uptime":  time.Since(stats.StartTime).String(),
+		"version":        version,
+		"uptime":         time.Since(stats.StartTime).String(),
+		"listen_address": cfg.ListenAddr(),
+		"whitelist_sources": cfg.Security.WhitelistSources,
+		"enrichment_rules":  rulesList,
 		"stats": map[string]uint64{
 			"packets_received":  atomic.LoadUint64(&stats.PacketsReceived),
 			"packets_forwarded": atomic.LoadUint64(&stats.PacketsForwarded),
@@ -744,6 +823,119 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // Telegram notifications
+
+// initTelegramClient creates the HTTP client for Telegram with timeout and optional IPv6 fallback
+func initTelegramClient() {
+	timeout := time.Duration(cfg.Telegram.HTTPTimeout) * time.Second
+
+	if cfg.Telegram.IPv6Fallback {
+		telegramClient = &http.Client{
+			Timeout: timeout,
+			Transport: &http.Transport{
+				DialContext:         ipv6FallbackDialer,
+				TLSHandshakeTimeout: 10 * time.Second,
+				IdleConnTimeout:     90 * time.Second,
+				MaxIdleConns:        2,
+			},
+		}
+		logInfo("Telegram client initialized with IPv6 fallback", map[string]interface{}{
+			"timeout": timeout.String(),
+		})
+	} else {
+		telegramClient = &http.Client{
+			Timeout: timeout,
+		}
+	}
+}
+
+// ipv6FallbackDialer tries IPv6 first, falls back to IPv4 if it fails
+func ipv6FallbackDialer(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+
+	// Try IPv6 first
+	conn, err := dialer.DialContext(ctx, "tcp6", addr)
+	if err == nil {
+		return conn, nil
+	}
+
+	logInfo("IPv6 connection failed, falling back to IPv4", map[string]interface{}{
+		"address": addr,
+		"error":   err.Error(),
+	})
+
+	// Send degradation alert (max 1 per hour)
+	ipv6AlertMu.Lock()
+	shouldAlert := time.Since(lastIPv6Alert) > time.Hour
+	if shouldAlert {
+		lastIPv6Alert = time.Now()
+	}
+	ipv6AlertMu.Unlock()
+
+	if shouldAlert {
+		go sendIPv6DegradationAlert()
+	}
+
+	// Fallback to IPv4
+	return dialer.DialContext(ctx, "tcp4", addr)
+}
+
+// sendIPv6DegradationAlert sends a one-off alert via IPv4-only client (avoids recursion)
+func sendIPv6DegradationAlert() {
+	hostname, _ := os.Hostname()
+	msg := fmt.Sprintf(
+		"⚠️ *sFlow ASN Enricher*\n"+
+			"━━━━━━━━━━━━━━━━━━━━━\n"+
+			"📍 *Host:* `%s`\n"+
+			"🏷️ *Event:* `ipv6_degraded`\n"+
+			"💬 *Details:* IPv6 connectivity to Telegram API failed, using IPv4 fallback\n"+
+			"🕐 *Time:* `%s`",
+		hostname, time.Now().Format("02/01/2006 15:04:05"))
+
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", cfg.Telegram.BotToken)
+	payload := map[string]interface{}{
+		"chat_id":    cfg.Telegram.ChatID,
+		"text":       msg,
+		"parse_mode": "Markdown",
+	}
+	jsonPayload, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+
+	// Use a separate IPv4-only client to avoid recursion through ipv6FallbackDialer
+	ipv4Client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := ipv4Client.Post(apiURL, "application/json", bytes.NewBuffer(jsonPayload))
+	if err != nil {
+		logError("Failed to send IPv6 degradation alert", err, nil)
+		return
+	}
+	resp.Body.Close()
+}
+
+// sendRateLimitedAlert sends an alert only if cooldown has elapsed for the given key
+func sendRateLimitedAlert(alertType, key, message string) {
+	cooldownKey := alertType + ":" + key
+	cooldownDuration := time.Duration(cfg.Telegram.FlapCooldown) * time.Second
+
+	alertCooldownsMu.Lock()
+	lastSent, exists := alertCooldowns[cooldownKey]
+	now := time.Now()
+	if exists && now.Sub(lastSent) < cooldownDuration {
+		remaining := (cooldownDuration - now.Sub(lastSent)).Round(time.Second)
+		alertCooldownsMu.Unlock()
+		logInfo("Telegram alert suppressed (cooldown)", map[string]interface{}{
+			"type":          alertType,
+			"key":           key,
+			"cooldown_left": remaining.String(),
+		})
+		return
+	}
+	alertCooldowns[cooldownKey] = now
+	alertCooldownsMu.Unlock()
+
+	sendTelegramAlert(alertType, message)
+}
+
 func sendTelegramAlert(alertType, message string) {
 	sendTelegramAlertWithWait(alertType, message, false)
 }
@@ -798,7 +990,7 @@ func sendTelegramAlertWithWait(alertType, message string, blocking bool) {
 			icon, hostname, alertType, message,
 			time.Now().Format("02/01/2006 15:04:05"))
 
-		url := fmt.Sprintf(
+		apiURL := fmt.Sprintf(
 			"https://api.telegram.org/bot%s/sendMessage",
 			cfg.Telegram.BotToken)
 
@@ -808,10 +1000,32 @@ func sendTelegramAlertWithWait(alertType, message string, blocking bool) {
 			"parse_mode": "Markdown",
 		}
 
-		jsonPayload, _ := json.Marshal(payload)
+		jsonPayload, err := json.Marshal(payload)
+		if err != nil {
+			logError("Failed to marshal Telegram payload", err, nil)
+			return
+		}
 
-		resp, err := http.Post(url, "application/json",
+		// Use context with timeout: 10s for blocking shutdown, configured timeout otherwise
+		var ctx context.Context
+		var cancel context.CancelFunc
+		if blocking {
+			ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+		} else {
+			ctx, cancel = context.WithTimeout(context.Background(),
+				time.Duration(cfg.Telegram.HTTPTimeout)*time.Second)
+		}
+		defer cancel()
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL,
 			bytes.NewBuffer(jsonPayload))
+		if err != nil {
+			logError("Failed to create Telegram request", err, nil)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := telegramClient.Do(req)
 		if err != nil {
 			logError("Failed to send Telegram alert", err, nil)
 			return
@@ -879,11 +1093,54 @@ func statsReporter(intervalSeconds int) {
 		intervalSeconds = 60
 	}
 
+	// Initialize previous snapshot for drop rate calculation
+	prevReceived = atomic.LoadUint64(&stats.PacketsReceived)
+	prevDropped = atomic.LoadUint64(&stats.PacketsDropped)
+
 	ticker := time.NewTicker(time.Duration(intervalSeconds) * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
 		printStats()
+		checkDropRate()
+	}
+}
+
+func checkDropRate() {
+	curReceived := atomic.LoadUint64(&stats.PacketsReceived)
+	curDropped := atomic.LoadUint64(&stats.PacketsDropped)
+
+	// Calculate delta since last check
+	deltaReceived := curReceived - prevReceived
+	deltaDropped := curDropped - prevDropped
+
+	// Update snapshot for next interval
+	prevReceived = curReceived
+	prevDropped = curDropped
+
+	// Need a minimum number of packets to avoid false positives
+	if deltaReceived < 100 {
+		return
+	}
+
+	dropRate := float64(deltaDropped) / float64(deltaReceived) * 100.0
+
+	if dropRate >= cfg.Telegram.DropRateThreshold {
+		logError("High drop rate detected", nil, map[string]interface{}{
+			"drop_rate": fmt.Sprintf("%.1f%%", dropRate),
+			"threshold": fmt.Sprintf("%.1f%%", cfg.Telegram.DropRateThreshold),
+			"received":  deltaReceived,
+			"dropped":   deltaDropped,
+		})
+
+		msg := fmt.Sprintf("Drop rate `%.1f%%` exceeds threshold `%.1f%%`\n"+
+			"📊 Interval: `%d` received, `%d` dropped\n"+
+			"📈 Total: `%d` received, `%d` dropped",
+			dropRate, cfg.Telegram.DropRateThreshold,
+			deltaReceived, deltaDropped,
+			curReceived, curDropped)
+
+		sendRateLimitedAlert("high_drop_rate", "global", msg)
 	}
 }
 

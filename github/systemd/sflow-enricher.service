@@ -1,22 +1,23 @@
 [Unit]
-Description=sFlow ASN Enricher Proxy
-Documentation=https://github.com/goline-sa/sflow-asn-enricher
+Description=sFlow Enricher Proxy
+Documentation=https://github.com/goline-sa/sflow-enricher
 After=network.target
 Wants=network-online.target
 
 [Service]
-Type=simple
-ExecStart=/usr/local/bin/sflow-asn-enricher -config /etc/sflow-asn-enricher/config.yaml
-ExecReload=/bin/kill -HUP $MAINPID
+Type=notify
+ExecStart=/usr/local/bin/sflow-enricher -config /etc/sflow-enricher/config.yaml
 Restart=always
 RestartSec=5
+WatchdogSec=30
+TimeoutStopSec=30
 
 # Security hardening
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ReadOnlyPaths=/etc/sflow-asn-enricher
+ReadOnlyPaths=/etc/sflow-enricher
 
 # Resource limits
 LimitNOFILE=65535
@@ -25,7 +26,7 @@ MemoryMax=256M
 # Logging
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=sflow-asn-enricher
+SyslogIdentifier=sflow-enricher
 
 [Install]
 WantedBy=multi-user.target

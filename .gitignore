@@ -24,3 +24,7 @@ coverage.html
 
 # Local config (may contain secrets)
 config.local.yaml
+
+# Internal documentation (not sanitized for public repo)
+docs/COMPLETE_TECHNICAL_SPECIFICATION.md
+docs/SOURCE_CODE_ANALYSIS.md

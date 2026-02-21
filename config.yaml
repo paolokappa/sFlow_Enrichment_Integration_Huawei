@@ -1,4 +1,4 @@
-# sFlow Enricher Configuration v2.0
+# sFlow Enricher Configuration v2.2
 # Proxy that enriches sFlow packets with ASN information
 
 # Listen address for incoming sFlow
@@ -18,40 +18,41 @@ http:
 
 # Destinations to forward enriched sFlow
 destinations:
-  - name: "cloudflare"
-    address: "162.159.65.1"
+  - name: "primary-collector"
+    address: "198.51.100.1"
     port: 6343
     enabled: true
     primary: true
-    # failover: "backup-cloudflare"  # Optional: name of failover destination
+    # failover: "backup-collector"  # Optional: name of failover destination
 
-  - name: "noction"
-    address: "208.122.196.72"
+  - name: "secondary-collector"
+    address: "198.51.100.2"
     port: 6343
     enabled: true
     primary: true
 
 # ASN enrichment rules
+# Enriches: SrcAS, SrcPeerAS, RouterAS (in-place) and DstAS (XDR insert)
 # If src_ip matches network and src_as equals 'match_as', replace with 'set_as'
 enrichment:
   rules:
-    - name: "goline-ipv4"
-      network: "185.54.80.0/22"
+    - name: "my-network-ipv4"
+      network: "203.0.113.0/24"
       match_as: 0          # Only enrich if current AS is 0
-      set_as: 202032
+      set_as: 64512
       overwrite: false     # Don't overwrite if AS already set
 
-    - name: "goline-ipv6"
-      network: "2a02:4460::/32"
+    - name: "my-network-ipv6"
+      network: "2001:db8::/32"
       match_as: 0
-      set_as: 202032
+      set_as: 64512
       overwrite: false
 
 # Security settings
 security:
   whitelist_enabled: true
   whitelist_sources:
-    - "185.54.80.2"        # NetEngine 8000 router
+    - "10.0.0.1"           # Router IP
     # - "10.0.0.0/8"       # Add more sources as needed
 
 # Logging configuration
@@ -69,4 +70,9 @@ telegram:
     - "startup"
     - "shutdown"
     - "destination_down"
+    - "destination_up"
     # - "high_drop_rate"
+  # drop_rate_threshold: 5.0   # Drop rate % to trigger high_drop_rate alert (default: 5.0)
+  # http_timeout: 15           # HTTP request timeout in seconds (default: 15)
+  # flap_cooldown: 300         # Seconds between alerts for same destination (default: 300)
+  # ipv6_fallback: false       # Try IPv6 first, fallback to IPv4 if it fails (default: false)

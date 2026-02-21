@@ -53,8 +53,26 @@ $ curl -s http://127.0.0.1:8080/status | jq .
 
 ```json
 {
-  "version": "2.0.0",
+  "version": "2.2.0",
   "uptime": "2h30m15s",
+  "listen_address": "0.0.0.0:6343",
+  "whitelist_sources": ["10.0.0.1"],
+  "enrichment_rules": [
+    {
+      "name": "my-network-ipv4",
+      "network": "203.0.113.0/24",
+      "match_as": 0,
+      "set_as": 64512,
+      "overwrite": false
+    },
+    {
+      "name": "my-network-ipv6",
+      "network": "2001:db8::/32",
+      "match_as": 0,
+      "set_as": 64512,
+      "overwrite": false
+    }
+  ],
   "stats": {
     "packets_received": 125000,
     "packets_forwarded": 250000,
@@ -66,16 +84,16 @@ $ curl -s http://127.0.0.1:8080/status | jq .
   },
   "destinations": [
     {
-      "name": "cloudflare",
-      "address": "162.159.65.1:6343",
+      "name": "primary-collector",
+      "address": "198.51.100.1:6343",
       "healthy": true,
       "packets_sent": 125000,
       "packets_dropped": 0,
       "last_error": ""
     },
     {
-      "name": "noction",
-      "address": "208.122.196.72:6343",
+      "name": "local-collector",
+      "address": "198.51.100.3:6343",
       "healthy": true,
       "packets_sent": 125000,
       "packets_dropped": 0,
@@ -91,9 +109,17 @@ $ curl -s http://127.0.0.1:8080/status | jq .
 |-------|------|-------------|
 | `version` | string | sflow-enricher version |
 | `uptime` | string | Time since service started |
+| `listen_address` | string | UDP listen address:port |
+| `whitelist_sources` | []string | Whitelisted source IP addresses |
+| `enrichment_rules` | []object | Active enrichment rules |
+| `enrichment_rules[].name` | string | Rule name |
+| `enrichment_rules[].network` | string | CIDR network prefix |
+| `enrichment_rules[].match_as` | uint32 | Match condition (0 = unset AS) |
+| `enrichment_rules[].set_as` | uint32 | AS value to set (SrcAS, SrcPeerAS, DstAS, RouterAS) |
+| `enrichment_rules[].overwrite` | bool | Overwrite regardless of match_as |
 | `stats.packets_received` | uint64 | Total packets received |
 | `stats.packets_forwarded` | uint64 | Total packets forwarded (sum of all destinations) |
-| `stats.packets_enriched` | uint64 | Packets where SrcAS was modified |
+| `stats.packets_enriched` | uint64 | Packets where SrcAS/SrcPeerAS/DstAS/RouterAS was modified |
 | `stats.packets_dropped` | uint64 | Packets that failed to forward |
 | `stats.packets_filtered` | uint64 | Packets dropped by whitelist |
 | `stats.bytes_received` | uint64 | Total bytes received |
@@ -153,13 +179,13 @@ sflow_enricher_uptime_seconds 9015
 
 # HELP sflow_enricher_destination_packets_sent_total Packets sent to destination
 # TYPE sflow_enricher_destination_packets_sent_total counter
-sflow_enricher_destination_packets_sent_total{destination="cloudflare"} 125000
-sflow_enricher_destination_packets_sent_total{destination="noction"} 125000
+sflow_enricher_destination_packets_sent_total{destination="primary-collector"} 125000
+sflow_enricher_destination_packets_sent_total{destination="secondary-collector"} 125000
 
 # HELP sflow_enricher_destination_healthy Destination health status
 # TYPE sflow_enricher_destination_healthy gauge
-sflow_enricher_destination_healthy{destination="cloudflare"} 1
-sflow_enricher_destination_healthy{destination="noction"} 1
+sflow_enricher_destination_healthy{destination="primary-collector"} 1
+sflow_enricher_destination_healthy{destination="secondary-collector"} 1
 ```
 
 **Metrics:**
@@ -168,7 +194,7 @@ sflow_enricher_destination_healthy{destination="noction"} 1
 |--------|------|--------|-------------|
 | `sflow_enricher_packets_received_total` | counter | - | Total packets received |
 | `sflow_enricher_packets_forwarded_total` | counter | - | Total packets forwarded |
-| `sflow_enricher_packets_enriched_total` | counter | - | Packets with modified SrcAS |
+| `sflow_enricher_packets_enriched_total` | counter | - | Packets with modified SrcAS/SrcPeerAS/DstAS/RouterAS |
 | `sflow_enricher_packets_dropped_total` | counter | - | Failed forwards |
 | `sflow_enricher_packets_filtered_total` | counter | - | Whitelist drops |
 | `sflow_enricher_bytes_received_total` | counter | - | Bytes received |

@@ -5,7 +5,7 @@ Configuration file location: `/etc/sflow-enricher/config.yaml`
 ## Full Example
 
 ```yaml
-# sFlow Enricher Configuration v2.0
+# sFlow Enricher Configuration v2.1
 
 # Listen address for incoming sFlow
 listen:
@@ -20,21 +20,21 @@ http:
 
 # Destinations to forward enriched sFlow
 destinations:
-  - name: "cloudflare"
-    address: "162.159.65.1"
+  - name: "primary-collector"
+    address: "198.51.100.1"
     port: 6343
     enabled: true
     primary: true
-    failover: "cloudflare-backup"
+    failover: "primary-collector-backup"
 
-  - name: "cloudflare-backup"
-    address: "162.159.65.2"
+  - name: "primary-collector-backup"
+    address: "198.51.100.10"
     port: 6343
     enabled: true
     primary: false
 
-  - name: "noction"
-    address: "208.122.196.72"
+  - name: "secondary-collector"
+    address: "198.51.100.2"
     port: 6343
     enabled: true
     primary: true
@@ -42,23 +42,23 @@ destinations:
 # ASN enrichment rules
 enrichment:
   rules:
-    - name: "goline-ipv4"
-      network: "185.54.80.0/22"
+    - name: "my-network-ipv4"
+      network: "203.0.113.0/24"
       match_as: 0
-      set_as: 202032
+      set_as: 64512
       overwrite: false
 
-    - name: "goline-ipv6"
-      network: "2a02:4460::/32"
+    - name: "my-network-ipv6"
+      network: "2001:db8::/32"
       match_as: 0
-      set_as: 202032
+      set_as: 64512
       overwrite: false
 
 # Security settings
 security:
   whitelist_enabled: true
   whitelist_sources:
-    - "185.54.80.2"
+    - "10.0.0.1"
     - "10.0.0.0/8"
 
 # Logging configuration
@@ -76,6 +76,12 @@ telegram:
     - "startup"
     - "shutdown"
     - "destination_down"
+    - "destination_up"
+    - "high_drop_rate"
+  drop_rate_threshold: 5.0
+  http_timeout: 15
+  flap_cooldown: 300
+  ipv6_fallback: false
 ```
 
 ---
@@ -138,15 +144,15 @@ List of collectors to forward enriched sFlow packets to.
 
 ```yaml
 destinations:
-  - name: "cloudflare"
-    address: "162.159.65.1"
+  - name: "primary-collector"
+    address: "198.51.100.1"
     port: 6343
     enabled: true
     primary: true
-    failover: "cloudflare-backup"
+    failover: "primary-collector-backup"
 
-  - name: "cloudflare-backup"
-    address: "162.159.65.2"
+  - name: "primary-collector-backup"
+    address: "198.51.100.10"
     port: 6343
     enabled: true
     primary: false
@@ -225,7 +231,7 @@ Controls access to the proxy.
 security:
   whitelist_enabled: true
   whitelist_sources:
-    - "185.54.80.2"       # Single IP
+    - "10.0.0.1"          # Single IP
     - "10.0.0.0/8"        # CIDR notation
     - "192.168.1.0/24"
 ```
@@ -278,11 +284,17 @@ Telegram bot notifications for alerts.
 | `bot_token` | string | `""` | Bot token from @BotFather |
 | `chat_id` | string | `""` | Chat or group ID |
 | `alert_on` | []string | `[]` | List of alert types to send |
+| `drop_rate_threshold` | float64 | `5.0` | Drop rate percentage to trigger `high_drop_rate` alert |
+| `http_timeout` | int | `15` | HTTP request timeout in seconds for Telegram API calls |
+| `flap_cooldown` | int | `300` | Seconds between alerts for the same destination (prevents flapping) |
+| `ipv6_fallback` | bool | `false` | Try IPv6 first, fallback to IPv4 if it fails |
 
 **Alert types:**
 - `startup` - Service started
 - `shutdown` - Service stopping
-- `destination_down` - Destination became unhealthy/healthy
+- `destination_down` - Destination became unhealthy
+- `destination_up` - Destination recovered after being down
+- `high_drop_rate` - Drop rate exceeded `drop_rate_threshold`
 
 ```yaml
 telegram:
@@ -293,6 +305,12 @@ telegram:
     - "startup"
     - "shutdown"
     - "destination_down"
+    - "destination_up"
+    - "high_drop_rate"
+  drop_rate_threshold: 5.0   # Alert when drops > 5%
+  http_timeout: 15            # 15 second timeout
+  flap_cooldown: 300          # 5 minutes between same-destination alerts
+  ipv6_fallback: false        # Enable IPv6-first with IPv4 fallback
 ```
 
 **Getting credentials:**

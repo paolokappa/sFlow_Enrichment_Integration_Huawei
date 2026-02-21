@@ -69,10 +69,14 @@ type SecurityConfig struct {
 }
 
 type TelegramConfig struct {
-	Enabled   bool   `yaml:"enabled"`
-	BotToken  string `yaml:"bot_token"`
-	ChatID    string `yaml:"chat_id"`
-	AlertOn   []string `yaml:"alert_on"` // "destination_down", "high_drop_rate", "startup", "shutdown"
+	Enabled           bool     `yaml:"enabled"`
+	BotToken          string   `yaml:"bot_token"`
+	ChatID            string   `yaml:"chat_id"`
+	AlertOn           []string `yaml:"alert_on"`            // "startup", "shutdown", "destination_down", "destination_up", "high_drop_rate"
+	DropRateThreshold float64  `yaml:"drop_rate_threshold"` // percentage, default 5.0
+	HTTPTimeout       int      `yaml:"http_timeout"`        // seconds, default 15
+	FlapCooldown      int      `yaml:"flap_cooldown"`       // seconds between alerts for same destination, default 300
+	IPv6Fallback      bool     `yaml:"ipv6_fallback"`       // try IPv6 first, fallback to IPv4
 }
 
 func Load(path string) (*Config, error) {
@@ -133,6 +137,15 @@ func (c *Config) parse() error {
 	}
 	if c.HTTP.Port == 0 {
 		c.HTTP.Port = 8080
+	}
+	if c.Telegram.DropRateThreshold == 0 {
+		c.Telegram.DropRateThreshold = 5.0
+	}
+	if c.Telegram.HTTPTimeout == 0 {
+		c.Telegram.HTTPTimeout = 15
+	}
+	if c.Telegram.FlapCooldown == 0 {
+		c.Telegram.FlapCooldown = 300
 	}
 
 	return nil

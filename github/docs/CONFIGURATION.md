@@ -1,11 +1,11 @@
 # Configuration Reference
 
-Configuration file location: `/etc/sflow-asn-enricher/config.yaml`
+Configuration file location: `/etc/sflow-enricher/config.yaml`
 
 ## Full Example
 
 ```yaml
-# sFlow ASN Enricher Configuration v2.0
+# sFlow Enricher Configuration v2.1
 
 # Listen address for incoming sFlow
 listen:
@@ -25,9 +25,9 @@ destinations:
     port: 6343
     enabled: true
     primary: true
-    failover: "backup-collector"
+    failover: "primary-collector-backup"
 
-  - name: "backup-collector"
+  - name: "primary-collector-backup"
     address: "198.51.100.10"
     port: 6343
     enabled: true
@@ -76,6 +76,12 @@ telegram:
     - "startup"
     - "shutdown"
     - "destination_down"
+    - "destination_up"
+    - "high_drop_rate"
+  drop_rate_threshold: 5.0
+  http_timeout: 15
+  flap_cooldown: 300
+  ipv6_fallback: false
 ```
 
 ---
@@ -143,9 +149,9 @@ destinations:
     port: 6343
     enabled: true
     primary: true
-    failover: "backup-collector"
+    failover: "primary-collector-backup"
 
-  - name: "backup-collector"
+  - name: "primary-collector-backup"
     address: "198.51.100.10"
     port: 6343
     enabled: true
@@ -161,7 +167,10 @@ destinations:
 
 ### enrichment
 
-Rules for modifying ASN fields in sFlow packets.
+Rules for modifying ASN fields in sFlow packets. Rules are applied to **both SrcAS and DstAS**:
+
+- **SrcAS enrichment**: Applied when source IP matches the network (outbound traffic)
+- **DstAS enrichment**: Applied when destination IP matches the network AND DstASPath is empty (inbound traffic)
 
 #### enrichment.rules
 
@@ -169,9 +178,9 @@ Rules for modifying ASN fields in sFlow packets.
 |-----------|------|---------|-------------|
 | `name` | string | required | Rule name (for logging) |
 | `network` | string | required | CIDR notation (e.g., `"192.168.0.0/16"`) |
-| `match_as` | uint32 | required | Only apply if current SrcAS equals this value |
-| `set_as` | uint32 | required | New SrcAS value to set |
-| `overwrite` | bool | `false` | If true, ignore `match_as` and always overwrite |
+| `match_as` | uint32 | required | Only apply SrcAS if current value equals this |
+| `set_as` | uint32 | required | New AS value to set |
+| `overwrite` | bool | `false` | If true, ignore `match_as` and always overwrite SrcAS |
 
 ```yaml
 enrichment:
@@ -189,13 +198,23 @@ enrichment:
       overwrite: true       # Always set, regardless of current value
 ```
 
-**How it works:**
-1. For each flow sample, extract source IP from raw packet header
+**How SrcAS enrichment works (outbound traffic):**
+1. Extract source IP from raw packet header
 2. Check if source IP matches any rule's network
 3. If `overwrite: false`, only modify if current SrcAS equals `match_as`
 4. If `overwrite: true`, always modify regardless of current SrcAS
-5. Modify the SrcAS field in the sFlow packet
-6. Forward modified packet to destinations
+5. Modify the SrcAS field in-place (no packet resize)
+
+**How DstAS enrichment works (inbound traffic):**
+1. Extract destination IP from raw packet header
+2. Check if destination IP matches any rule's network
+3. Check if DstASPath is empty (length = 0)
+4. Insert AS path segment with `set_as` value (packet resize +12 bytes)
+5. Update record and sample length fields (XDR-compliant)
+
+**Multi-sample handling:**
+- Samples are processed in **reverse order** (last to first)
+- This ensures packet resizing doesn't corrupt subsequent sample offsets
 
 ---
 
@@ -265,11 +284,17 @@ Telegram bot notifications for alerts.
 | `bot_token` | string | `""` | Bot token from @BotFather |
 | `chat_id` | string | `""` | Chat or group ID |
 | `alert_on` | []string | `[]` | List of alert types to send |
+| `drop_rate_threshold` | float64 | `5.0` | Drop rate percentage to trigger `high_drop_rate` alert |
+| `http_timeout` | int | `15` | HTTP request timeout in seconds for Telegram API calls |
+| `flap_cooldown` | int | `300` | Seconds between alerts for the same destination (prevents flapping) |
+| `ipv6_fallback` | bool | `false` | Try IPv6 first, fallback to IPv4 if it fails |
 
 **Alert types:**
 - `startup` - Service started
 - `shutdown` - Service stopping
-- `destination_down` - Destination became unhealthy/healthy
+- `destination_down` - Destination became unhealthy
+- `destination_up` - Destination recovered after being down
+- `high_drop_rate` - Drop rate exceeded `drop_rate_threshold`
 
 ```yaml
 telegram:
@@ -280,6 +305,12 @@ telegram:
     - "startup"
     - "shutdown"
     - "destination_down"
+    - "destination_up"
+    - "high_drop_rate"
+  drop_rate_threshold: 5.0   # Alert when drops > 5%
+  http_timeout: 15            # 15 second timeout
+  flap_cooldown: 300          # 5 minutes between same-destination alerts
+  ipv6_fallback: false        # Enable IPv6-first with IPv4 fallback
 ```
 
 **Getting credentials:**
@@ -300,9 +331,9 @@ The following settings can be reloaded without restart:
 
 **To reload:**
 ```bash
-systemctl reload sflow-asn-enricher
+systemctl reload sflow-enricher
 # or
-kill -HUP $(pgrep sflow-asn-enricher)
+kill -HUP $(pgrep sflow-enricher)
 ```
 
 Settings that require restart:

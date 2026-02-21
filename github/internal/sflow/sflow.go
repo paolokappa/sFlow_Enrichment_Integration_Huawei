@@ -113,9 +113,15 @@ func Parse(data []byte) (*Datagram, error) {
 	// Agent address
 	switch d.AgentAddrType {
 	case AddressTypeIPv4:
+		if len(data) < 28 { // 4+4+4+4+4+4+4 = 28 bytes minimum for IPv4 header
+			return nil, fmt.Errorf("packet too short for IPv4 agent: %d bytes", len(data))
+		}
 		d.AgentAddr = net.IP(data[offset : offset+4])
 		offset += 4
 	case AddressTypeIPv6:
+		if len(data) < 40 { // 4+4+16+4+4+4+4 = 40 bytes minimum for IPv6 header
+			return nil, fmt.Errorf("packet too short for IPv6 agent: %d bytes", len(data))
+		}
 		d.AgentAddr = net.IP(data[offset : offset+16])
 		offset += 16
 	default:
@@ -171,8 +177,12 @@ func Parse(data []byte) (*Datagram, error) {
 
 // ParseFlowSample parses flow sample data
 func ParseFlowSample(data []byte, expanded bool) (*FlowSample, error) {
-	if len(data) < 32 {
-		return nil, fmt.Errorf("flow sample too short")
+	minLen := 32 // standard flow_sample: 8 fields * 4 bytes
+	if expanded {
+		minLen = 44 // expanded: 11 fields * 4 bytes (source_id split + input/output expanded)
+	}
+	if len(data) < minLen {
+		return nil, fmt.Errorf("flow sample too short: %d bytes (need %d)", len(data), minLen)
 	}
 
 	fs := &FlowSample{}
@@ -203,13 +213,12 @@ func ParseFlowSample(data []byte, expanded bool) (*FlowSample, error) {
 	offset += 4
 
 	if expanded {
+		// Expanded: interface_expanded = {format(4), value(4)}
+		offset += 4 // skip input format
 		fs.Input = binary.BigEndian.Uint32(data[offset:])
 		offset += 4
-		// Skip input format for expanded
-		offset += 4
+		offset += 4 // skip output format
 		fs.Output = binary.BigEndian.Uint32(data[offset:])
-		offset += 4
-		// Skip output format for expanded
 		offset += 4
 	} else {
 		fs.Input = binary.BigEndian.Uint32(data[offset:])
@@ -302,6 +311,11 @@ func ParseExtendedGateway(data []byte) (*ExtendedGateway, error) {
 			segLen := binary.BigEndian.Uint32(data[offset:])
 			offset += 4
 
+			// Validate that all ASNs in this segment fit within the data
+			if offset+int(segLen)*4 > len(data) {
+				break // Truncated segment, stop parsing
+			}
+
 			for j := uint32(0); j < segLen && offset+4 <= len(data); j++ {
 				asn := binary.BigEndian.Uint32(data[offset:])
 				offset += 4
@@ -329,7 +343,61 @@ func ParseExtendedGateway(data []byte) (*ExtendedGateway, error) {
 	return eg, nil
 }
 
-// GetSrcIPFromRawPacket extracts source IP from raw packet header record
+// GetSrcDstIPFromRawPacket extracts source and destination IP from raw packet header record
+func GetSrcDstIPFromRawPacket(data []byte) (srcIP, dstIP net.IP) {
+	if len(data) < 20 {
+		return nil, nil
+	}
+
+	offset := 0
+	protocol := binary.BigEndian.Uint32(data[offset:])
+	offset += 4
+	_ = protocol
+
+	offset += 4 // frame_length
+	offset += 4 // stripped
+
+	headerLen := binary.BigEndian.Uint32(data[offset:])
+	offset += 4
+
+	if offset+int(headerLen) > len(data) || headerLen < 20 {
+		return nil, nil
+	}
+
+	header := data[offset : offset+int(headerLen)]
+
+	if len(header) >= 34 {
+		etherType := binary.BigEndian.Uint16(header[12:14])
+
+		switch etherType {
+		case 0x0800: // IPv4
+			if len(header) >= 34 {
+				srcIP = net.IP(header[26:30])
+				dstIP = net.IP(header[30:34])
+				return
+			}
+		case 0x86DD: // IPv6
+			if len(header) >= 54 {
+				srcIP = net.IP(header[22:38])
+				dstIP = net.IP(header[38:54])
+				return
+			}
+		case 0x8100: // VLAN tagged
+			if len(header) >= 38 {
+				innerType := binary.BigEndian.Uint16(header[16:18])
+				if innerType == 0x0800 && len(header) >= 38 {
+					srcIP = net.IP(header[30:34])
+					dstIP = net.IP(header[34:38])
+					return
+				}
+			}
+		}
+	}
+
+	return nil, nil
+}
+
+// GetSrcIPFromRawPacket extracts source IP from raw packet header record (legacy)
 func GetSrcIPFromRawPacket(data []byte) net.IP {
 	if len(data) < 20 {
 		return nil
@@ -382,6 +450,88 @@ func GetSrcIPFromRawPacket(data []byte) net.IP {
 	}
 
 	return nil
+}
+
+// ModifyDstAS inserts destination AS into an empty DstASPath
+// Returns the modified packet (may be resized) and success flag
+func ModifyDstAS(packet []byte, sampleOffset int, recordOffset int, newAS uint32) ([]byte, bool) {
+	// Calculate absolute offset to DstASPathLen field
+	if sampleOffset+8 > len(packet) {
+		return packet, false
+	}
+
+	sampleLen := binary.BigEndian.Uint32(packet[sampleOffset+4:])
+	sampleDataStart := sampleOffset + 8
+
+	if sampleDataStart+int(sampleLen) > len(packet) {
+		return packet, false
+	}
+
+	absRecordOffset := sampleDataStart + recordOffset
+	if absRecordOffset+8 > len(packet) {
+		return packet, false
+	}
+
+	recordLen := binary.BigEndian.Uint32(packet[absRecordOffset+4:])
+	recordDataStart := absRecordOffset + 8
+
+	if recordDataStart+int(recordLen) > len(packet) {
+		return packet, false
+	}
+
+	// Read next hop type
+	if recordDataStart+4 > len(packet) {
+		return packet, false
+	}
+	nextHopType := binary.BigEndian.Uint32(packet[recordDataStart:])
+
+	var dstASPathLenOffset int
+	switch nextHopType {
+	case AddressTypeIPv4:
+		dstASPathLenOffset = recordDataStart + 4 + 4 + 4 + 4 + 4 // type + ipv4 + AS + SrcAS + SrcPeerAS
+	case AddressTypeIPv6:
+		dstASPathLenOffset = recordDataStart + 4 + 16 + 4 + 4 + 4 // type + ipv6 + AS + SrcAS + SrcPeerAS
+	default:
+		return packet, false
+	}
+
+	if dstASPathLenOffset+4 > len(packet) {
+		return packet, false
+	}
+
+	// Check current DstASPathLen
+	currentPathLen := binary.BigEndian.Uint32(packet[dstASPathLenOffset:])
+	if currentPathLen != 0 {
+		// Already has AS path, don't modify
+		return packet, false
+	}
+
+	// Insert AS path segment: pathLen(4) + segType(4) + segLen(4) + ASN(4) = 12 bytes to insert
+	// But we're replacing pathLen=0 with pathLen=1, so we need to insert 12 bytes after pathLen
+	insertPoint := dstASPathLenOffset + 4
+	insertData := make([]byte, 12)
+	binary.BigEndian.PutUint32(insertData[0:], 2)     // AS_SEQUENCE type
+	binary.BigEndian.PutUint32(insertData[4:], 1)     // 1 ASN in segment
+	binary.BigEndian.PutUint32(insertData[8:], newAS) // The ASN
+
+	// Create new packet with inserted data
+	newPacket := make([]byte, len(packet)+12)
+	copy(newPacket[:insertPoint], packet[:insertPoint])
+	copy(newPacket[insertPoint:insertPoint+12], insertData)
+	copy(newPacket[insertPoint+12:], packet[insertPoint:])
+
+	// Update DstASPathLen to 1
+	binary.BigEndian.PutUint32(newPacket[dstASPathLenOffset:], 1)
+
+	// Update record length (+12)
+	newRecordLen := recordLen + 12
+	binary.BigEndian.PutUint32(newPacket[absRecordOffset+4:], newRecordLen)
+
+	// Update sample length (+12)
+	newSampleLen := sampleLen + 12
+	binary.BigEndian.PutUint32(newPacket[sampleOffset+4:], newSampleLen)
+
+	return newPacket, true
 }
 
 // ModifySrcAS modifies the source AS in the raw packet at the specified offset
@@ -438,4 +588,104 @@ func ModifySrcAS(packet []byte, sampleOffset int, recordOffset int, newAS uint32
 
 	// Write new SrcAS
 	binary.BigEndian.PutUint32(packet[srcASOffset:], newAS)
+}
+
+// ModifyRouterAS modifies the router's own AS field (the "as" field in extended gateway).
+// This field should always contain the AS of the exporting router.
+// Layout: NextHopType(4) + NextHop(4|16) + AS(4) + SrcAS(4) + SrcPeerAS(4)
+//                                           ^--- this field
+func ModifyRouterAS(packet []byte, sampleOffset int, recordOffset int, newAS uint32) {
+	if sampleOffset+8 > len(packet) {
+		return
+	}
+
+	sampleLen := binary.BigEndian.Uint32(packet[sampleOffset+4:])
+	sampleDataStart := sampleOffset + 8
+
+	if sampleDataStart+int(sampleLen) > len(packet) {
+		return
+	}
+
+	absRecordOffset := sampleDataStart + recordOffset
+	if absRecordOffset+8 > len(packet) {
+		return
+	}
+
+	recordLen := binary.BigEndian.Uint32(packet[absRecordOffset+4:])
+	recordDataStart := absRecordOffset + 8
+
+	if recordDataStart+int(recordLen) > len(packet) {
+		return
+	}
+
+	if recordDataStart+4 > len(packet) {
+		return
+	}
+	nextHopType := binary.BigEndian.Uint32(packet[recordDataStart:])
+
+	var routerASOffset int
+	switch nextHopType {
+	case AddressTypeIPv4:
+		routerASOffset = recordDataStart + 4 + 4 // type + ipv4
+	case AddressTypeIPv6:
+		routerASOffset = recordDataStart + 4 + 16 // type + ipv6
+	default:
+		return
+	}
+
+	if routerASOffset+4 > len(packet) {
+		return
+	}
+
+	binary.BigEndian.PutUint32(packet[routerASOffset:], newAS)
+}
+
+// ModifySrcPeerAS modifies the source peer AS field in extended gateway.
+// For locally-originated traffic, SrcPeerAS should equal the router's own AS.
+// Layout: NextHopType(4) + NextHop(4|16) + AS(4) + SrcAS(4) + SrcPeerAS(4)
+//                                                               ^--- this field
+func ModifySrcPeerAS(packet []byte, sampleOffset int, recordOffset int, newAS uint32) {
+	if sampleOffset+8 > len(packet) {
+		return
+	}
+
+	sampleLen := binary.BigEndian.Uint32(packet[sampleOffset+4:])
+	sampleDataStart := sampleOffset + 8
+
+	if sampleDataStart+int(sampleLen) > len(packet) {
+		return
+	}
+
+	absRecordOffset := sampleDataStart + recordOffset
+	if absRecordOffset+8 > len(packet) {
+		return
+	}
+
+	recordLen := binary.BigEndian.Uint32(packet[absRecordOffset+4:])
+	recordDataStart := absRecordOffset + 8
+
+	if recordDataStart+int(recordLen) > len(packet) {
+		return
+	}
+
+	if recordDataStart+4 > len(packet) {
+		return
+	}
+	nextHopType := binary.BigEndian.Uint32(packet[recordDataStart:])
+
+	var srcPeerASOffset int
+	switch nextHopType {
+	case AddressTypeIPv4:
+		srcPeerASOffset = recordDataStart + 4 + 4 + 4 + 4 // type + ipv4 + AS + SrcAS
+	case AddressTypeIPv6:
+		srcPeerASOffset = recordDataStart + 4 + 16 + 4 + 4 // type + ipv6 + AS + SrcAS
+	default:
+		return
+	}
+
+	if srcPeerASOffset+4 > len(packet) {
+		return
+	}
+
+	binary.BigEndian.PutUint32(packet[srcPeerASOffset:], newAS)
 }

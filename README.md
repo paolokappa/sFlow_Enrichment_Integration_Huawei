@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="#"><img src="https://img.shields.io/badge/version-2.0.0-blue.svg" alt="Version"></a>
+  <a href="#"><img src="https://img.shields.io/badge/version-2.2.1-blue.svg" alt="Version"></a>
   <a href="#"><img src="https://img.shields.io/badge/Go-1.21+-00ADD8.svg" alt="Go"></a>
   <a href="#"><img src="https://img.shields.io/badge/sFlow-v5-orange.svg" alt="sFlow v5"></a>
   <a href="#"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License"></a>
@@ -22,6 +22,7 @@
   <a href="#features">Features</a> •
   <a href="#installation">Installation</a> •
   <a href="#configuration">Configuration</a> •
+  <a href="#sflow-monitor">Monitor</a> •
   <a href="#documentation">Documentation</a>
 </p>
 
@@ -40,7 +41,10 @@ Huawei NetEngine 8000 routers (and similar devices) present two issues when expo
 | Direction | Issue | Impact |
 |-----------|-------|--------|
 | **Outbound** | `SrcAS = 0` for locally-originated traffic | Collectors cannot attribute traffic to correct origin AS |
+| **Outbound** | `SrcPeerAS = 0` for locally-originated traffic | Collectors see no source peer AS |
+| **Outbound** | `RouterAS = peer AS` (wrong value) | Router's own AS field contains destination peer AS |
 | **Inbound** | `DstASPath = []` (empty) for local destinations | Collectors cannot identify destination AS |
+| **Inbound** | `RouterAS = 0` (missing) | Router's own AS field is empty |
 
 ### The Solution
 
@@ -48,8 +52,10 @@ Huawei NetEngine 8000 routers (and similar devices) present two issues when expo
 ┌─────────────────┐         ┌─────────────────────┐         ┌─────────────────┐
 │  NetEngine 8000 │  sFlow  │   sFlow Enricher    │  sFlow  │    Collector    │
 │                 │────────►│                     │────────►│                 │
-│  SrcAS=0        │  UDP    │  SrcAS=202032       │  UDP    │  Cloudflare     │
-│  DstASPath=[]   │  :6343  │  DstASPath=[202032] │  :6343  │  Noction        │
+│  SrcAS=0        │  UDP    │  SrcAS=64512        │  UDP    │  Collector A    │
+│  SrcPeerAS=0    │  :6343  │  SrcPeerAS=64512    │  :6343  │  Collector B    │
+│  RouterAS=0     │         │  RouterAS=64512     │         │                 │
+│  DstASPath=[]   │         │  DstASPath=[64512]  │         │                 │
 └─────────────────┘         └─────────────────────┘         └─────────────────┘
 ```
 
@@ -62,6 +68,8 @@ Huawei NetEngine 8000 routers (and similar devices) present two issues when expo
 | Feature | Description |
 |---------|-------------|
 | **SrcAS Enrichment** | In-place modification of Source AS field for outbound traffic |
+| **SrcPeerAS Enrichment** | Sets SrcPeerAS to router's own AS when SrcPeerAS=0 (locally-originated traffic) |
+| **RouterAS Enrichment** | Sets router's own AS field when RouterAS=0 (inbound traffic) |
 | **DstAS Enrichment** | XDR-compliant insertion of Destination AS path segment for inbound traffic |
 | **Multi-Sample Support** | Correct handling of datagrams with multiple flow samples |
 | **Dual-Stack** | Full IPv4 and IPv6 support |
@@ -82,8 +90,9 @@ Huawei NetEngine 8000 routers (and similar devices) present two issues when expo
 | **Prometheus Metrics** | `/metrics` endpoint for monitoring |
 | **HTTP Status API** | `/status` endpoint with JSON statistics |
 | **Health Endpoint** | `/health` for load balancer integration |
-| **Telegram Alerts** | Real-time notifications for critical events |
+| **Telegram Alerts** | Real-time notifications with IPv6/IPv4 fallback and rate limiting |
 | **Structured Logging** | JSON or text format for ELK/Loki integration |
+| **Live Dashboard** | `sflow-monitor` ASCII dashboard with sparklines and flow diagram |
 
 ### Reliability
 
@@ -107,8 +116,9 @@ Huawei NetEngine 8000 routers (and similar devices) present two issues when expo
 │ 8000 M14    │               │  │                                    │  │
 │             │               │  │  ┌──────┐  ┌──────┐  ┌──────────┐  │  │
 │ sFlow Agent │               │  │  │Parse │─►│Match │─►│ Enrich   │  │  │
-│ 185.54.80.2 │               │  │  │sFlow │  │Rules │  │ SrcAS/   │  │  │
-└─────────────┘               │  │  │  v5  │  │      │  │ DstAS    │  │  │
+│ 10.0.0.1    │               │  │  │sFlow │  │Rules │  │SrcAS/Dst │  │  │
+└─────────────┘               │  │  │  v5  │  │      │  │PeerAS/   │  │  │
+                              │  │  │      │  │      │  │RouterAS  │  │  │
                               │  │  └──────┘  └──────┘  └────┬─────┘  │  │
                               │  │                           │        │  │
                               │  └───────────────────────────┼────────┘  │
@@ -126,9 +136,9 @@ Huawei NetEngine 8000 routers (and similar devices) present two issues when expo
                                │                             │                    │
                                ▼                             ▼                    ▼
                     ┌─────────────────────┐     ┌─────────────────────┐     ┌─────────┐
-                    │  Cloudflare Magic   │     │  Noction Flow       │     │  Other  │
-                    │  Transit            │     │  Analyzer           │     │         │
-                    │  162.159.65.1:6343  │     │  208.122.196.72:6343│     │         │
+                    │  Primary Collector  │     │  Secondary          │     │  Other  │
+                    │                     │     │  Collector          │     │         │
+                    │  198.51.100.1:6343  │     │  198.51.100.2:6343  │     │         │
                     └─────────────────────┘     └─────────────────────┘     └─────────┘
 ```
 
@@ -172,10 +182,10 @@ The core structure modified by this enricher:
 ```c
 struct extended_gateway {
    address nexthop;              // Next hop router address
-   unsigned int as;              // Router's own AS
-   unsigned int src_as;          // Source AS from routing  ◄── SrcAS enrichment
-   unsigned int src_peer_as;     // Source peer AS
-   as_path_type dst_as_path<>;   // AS path to destination  ◄── DstAS enrichment
+   unsigned int as;              // Router's own AS          ◄── RouterAS enrichment
+   unsigned int src_as;          // Source AS from routing   ◄── SrcAS enrichment
+   unsigned int src_peer_as;     // Source peer AS           ◄── SrcPeerAS enrichment
+   as_path_type dst_as_path<>;   // AS path to destination   ◄── DstAS enrichment
    unsigned int communities<>;   // BGP communities
    unsigned int localpref;       // Local preference
 };
@@ -217,6 +227,16 @@ The enricher strictly follows XDR encoding rules:
 - SrcAS field at fixed offset within Extended Gateway record
 - Simply overwrites 4 bytes when `SrcAS=0` and source IP matches rule
 
+**SrcPeerAS enrichment** (outbound traffic):
+- Modification is **in-place** (no packet resize)
+- SrcPeerAS field at offset: NextHopType(4) + NextHop(4|16) + AS(4) + SrcAS(4)
+- Sets SrcPeerAS to router's own AS when `SrcPeerAS=0` (locally-originated traffic)
+
+**RouterAS enrichment** (inbound/outbound traffic):
+- Modification is **in-place** (no packet resize)
+- AS field at offset: NextHopType(4) + NextHop(4|16)
+- Sets router's own AS when `RouterAS=0` (only enriches when the field is empty)
+
 **DstAS enrichment** (inbound traffic):
 - Requires **packet resize** (+12 bytes per enriched sample)
 - Inserts AS_SEQUENCE segment with the following structure:
@@ -226,7 +246,7 @@ DstAS Insertion: 12 bytes total (XDR-compliant)
 ┌────────────────┬────────────────┬────────────────┐
 │  Segment Type  │ Segment Length │   ASN Value    │
 │   (4 bytes)    │   (4 bytes)    │   (4 bytes)    │
-│  AS_SEQUENCE=2 │      1         │    202032      │
+│  AS_SEQUENCE=2 │      1         │    64512       │
 └────────────────┴────────────────┴────────────────┘
 ```
 
@@ -280,10 +300,10 @@ This approach guarantees mathematical correctness with zero additional overhead
 git clone https://github.com/paolokappa/sFlow_Enrichment_Integration_Huawei.git
 cd sFlow_Enrichment_Integration_Huawei/sflow-enricher
 
-# Build
-make build
+# Build (enricher + monitor)
+make all
 
-# Install (binary + config + systemd)
+# Install (binaries + config + systemd)
 sudo make install
 
 # Enable and start
@@ -307,7 +327,8 @@ curl http://127.0.0.1:8080/health
 
 | Path | Description |
 |------|-------------|
-| `/usr/local/bin/sflow-enricher` | Executable binary |
+| `/usr/local/bin/sflow-enricher` | Enricher binary |
+| `/usr/local/bin/sflow-monitor` | Monitor dashboard binary |
 | `/etc/sflow-enricher/config.yaml` | Configuration file |
 | `/etc/systemd/system/sflow-enricher.service` | Systemd unit |
 
@@ -338,7 +359,7 @@ enrichment:
       set_as: 64512
 ```
 
-### Production Example (Goline SA)
+### Production Example
 
 ```yaml
 listen:
@@ -351,36 +372,36 @@ http:
   port: 8080
 
 destinations:
-  - name: "cloudflare"
-    address: "162.159.65.1"
+  - name: "primary-collector"
+    address: "198.51.100.1"
     port: 6343
     enabled: true
     primary: true
 
-  - name: "noction"
-    address: "208.122.196.72"
+  - name: "secondary-collector"
+    address: "198.51.100.2"
     port: 6343
     enabled: true
     primary: true
 
 enrichment:
   rules:
-    - name: "goline-ipv4"
-      network: "185.54.80.0/22"
+    - name: "my-network-ipv4"
+      network: "203.0.113.0/24"
       match_as: 0
-      set_as: 202032
+      set_as: 64512
       overwrite: false
 
-    - name: "goline-ipv6"
-      network: "2a02:4460::/32"
+    - name: "my-network-ipv6"
+      network: "2001:db8::/32"
       match_as: 0
-      set_as: 202032
+      set_as: 64512
       overwrite: false
 
 security:
   whitelist_enabled: true
   whitelist_sources:
-    - "185.54.80.2"
+    - "10.0.0.1"
 
 logging:
   level: "info"
@@ -438,6 +459,54 @@ curl http://127.0.0.1:8080/metrics
 
 ---
 
+## sflow-monitor
+
+Real-time ASCII dashboard for monitoring the sFlow Enricher.
+
+### Quick Start
+
+```bash
+# Build
+make build-monitor
+
+# Run (connects to local enricher API)
+sflow-monitor
+
+# Custom URL and interval
+sflow-monitor -url http://192.168.1.100:8080 -interval 5
+
+# No colors (for logging/piping)
+sflow-monitor -no-color
+```
+
+### Dashboard Features
+
+| Feature | Description |
+|---------|-------------|
+| **Packet/Byte rates** | Real-time pps and KB/s with sparkline graphs |
+| **Enrichment stats** | Percentage bars for enriched/dropped/filtered |
+| **Enrichment rules** | Table with Name, Network, SrcAS, DstAS, Condition |
+| **Flow diagram** | Visual source -> enricher -> destinations with addresses |
+| **Destination table** | Health status, packets sent, drops, errors |
+| **Totals** | Cumulative counters with human-readable formatting |
+| **Dynamic sizing** | Frame auto-sizes to widest content at every refresh |
+| **Auto-reconnect** | Shows DISCONNECTED state and retries automatically |
+
+### Installation
+
+```bash
+# Install alongside sflow-enricher
+sudo make install
+
+# Or install manually
+sudo install -m 755 build/sflow-monitor /usr/local/bin/sflow-monitor
+
+# Static build (no dependencies)
+make build-static
+```
+
+---
+
 ## Documentation
 
 | Document | Description |
@@ -448,6 +517,7 @@ curl http://127.0.0.1:8080/metrics
 | [docs/MULTI_SAMPLE_FIX_RESEARCH.md](docs/MULTI_SAMPLE_FIX_RESEARCH.md) | Technical research on multi-sample handling |
 | [docs/SYSTEMD_INTEGRATION.md](docs/SYSTEMD_INTEGRATION.md) | Systemd notify and watchdog integration |
 | [docs/TELEGRAM_NOTIFICATIONS.md](docs/TELEGRAM_NOTIFICATIONS.md) | Telegram alerting configuration |
+| [CHANGELOG.md](CHANGELOG.md) | Version history and changes |
 
 ---
 
@@ -487,25 +557,29 @@ Tested on Ubuntu 24.04 LTS:
 
 ```
 sflow-enricher/
-├── cmd/sflow-enricher/
-│   └── main.go              # Application entry point
+├── cmd/
+│   ├── sflow-enricher/
+│   │   └── main.go              # Enricher entry point
+│   └── sflow-monitor/
+│       └── main.go              # Monitor dashboard entry point
 ├── internal/
 │   ├── config/
-│   │   └── config.go        # Configuration management
+│   │   └── config.go            # Configuration management
 │   └── sflow/
-│       └── sflow.go         # sFlow v5 parser/modifier
+│       └── sflow.go             # sFlow v5 parser/modifier
 ├── docs/
-│   ├── CONFIGURATION.md     # Configuration reference
-│   ├── API.md               # API documentation
-│   ├── OPERATIONS.md        # Operational guide
+│   ├── CONFIGURATION.md         # Configuration reference
+│   ├── API.md                   # API documentation
+│   ├── OPERATIONS.md            # Operational guide
 │   ├── MULTI_SAMPLE_FIX_RESEARCH.md
 │   ├── SYSTEMD_INTEGRATION.md
 │   └── TELEGRAM_NOTIFICATIONS.md
 ├── systemd/
 │   └── sflow-enricher.service
-├── config.yaml              # Example configuration
-├── Makefile                 # Build automation
-└── README.md                # This file
+├── config.yaml                  # Example configuration
+├── Makefile                     # Build automation
+├── CHANGELOG.md                 # Version history
+└── README.md                    # This file
 ```
 
 ---
@@ -534,5 +608,5 @@ sflow-enricher/
 </p>
 
 <p align="center">
-  <strong>Version 2.0.0</strong> • January 2026
+  <strong>Version 2.2.1</strong> • February 2026
 </p>

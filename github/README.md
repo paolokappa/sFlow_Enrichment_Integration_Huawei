@@ -1,640 +1,612 @@
 <p align="center">
-  <img src="assets/huawei-logo.png" alt="Huawei" height="60">
+  <img src="assets/huawei-logo.png" alt="Huawei" height="60"/>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="assets/goline-logo.png" alt="GOLINE SA" height="60"/>
 </p>
 
-# sFlow ASN Enrichment Integration for Huawei NetEngine
+<h1 align="center">sFlow ASN Enricher</h1>
 
-[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)]()
-[![Go](https://img.shields.io/badge/Go-1.21+-00ADD8.svg)](https://golang.org/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)]()
-[![sFlow](https://img.shields.io/badge/sFlow-v5-orange.svg)](https://sflow.org/)
+<p align="center">
+  <strong>High-performance sFlow v5 proxy for ASN enrichment</strong>
+</p>
 
-A high-performance sFlow v5 proxy specifically designed to solve the **SrcAS=0 problem** on Huawei NetEngine routers (NE8000, NE5000E, NE40E series). The proxy enriches sFlow packets with the correct Autonomous System Number before forwarding to downstream collectors such as Cloudflare Magic Transit, Noction Flow Analyzer, Kentik, or any sFlow-compatible platform.
+<p align="center">
+  <a href="#"><img src="https://img.shields.io/badge/version-2.2.1-blue.svg" alt="Version"></a>
+  <a href="#"><img src="https://img.shields.io/badge/Go-1.21+-00ADD8.svg" alt="Go"></a>
+  <a href="#"><img src="https://img.shields.io/badge/sFlow-v5-orange.svg" alt="sFlow v5"></a>
+  <a href="#"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License"></a>
+</p>
 
-## The Problem: Huawei NetEngine SrcAS=0 Issue
+<p align="center">
+  <a href="#overview">Overview</a> •
+  <a href="#features">Features</a> •
+  <a href="#installation">Installation</a> •
+  <a href="#configuration">Configuration</a> •
+  <a href="#sflow-monitor">Monitor</a> •
+  <a href="#documentation">Documentation</a>
+</p>
 
-### Background
+---
 
-Huawei NetEngine routers (including NE8000 M8/M14/F1A, NE5000E, NE40E) generate sFlow samples for network traffic monitoring. However, when traffic **originates from the local AS** (your own network prefixes), the router sets `SrcAS = 0` in the Extended Gateway record because:
+## Overview
 
-1. The traffic source IP belongs to directly connected or local networks
-2. The BGP RIB lookup returns no AS path for local prefixes
-3. The router correctly reports "no external AS" as `SrcAS = 0`
+**sFlow ASN Enricher** is a transparent sFlow v5 proxy written in Go that enriches flow samples with Autonomous System Number (ASN) information before forwarding to collectors.
 
-### Impact
+Designed specifically for environments where network devices (such as Huawei NetEngine routers) export sFlow data with missing or incomplete ASN information, this proxy intercepts sFlow datagrams, enriches them based on configurable rules, and forwards the modified packets to multiple destinations.
 
-This behavior causes significant issues for downstream collectors:
+### The Problem
 
-| Collector | Impact |
-|-----------|--------|
-| **Cloudflare Magic Transit** | Cannot attribute DDoS attack sources to your AS; traffic analytics incomplete |
-| **Noction Flow Analyzer** | AS path analysis broken; routing optimization decisions affected |
-| **Kentik** | Traffic attribution gaps; peering analysis incomplete |
-| **PRTG/LibreNMS** | AS-based traffic reports show "Unknown AS" for local traffic |
+Huawei NetEngine 8000 routers (and similar devices) present two issues when exporting sFlow:
 
-### Solution
+| Direction | Issue | Impact |
+|-----------|-------|--------|
+| **Outbound** | `SrcAS = 0` for locally-originated traffic | Collectors cannot attribute traffic to correct origin AS |
+| **Outbound** | `SrcPeerAS = 0` for locally-originated traffic | Collectors see no source peer AS |
+| **Outbound** | `RouterAS = peer AS` (wrong value) | Router's own AS field contains destination peer AS |
+| **Inbound** | `DstASPath = []` (empty) for local destinations | Collectors cannot identify destination AS |
+| **Inbound** | `RouterAS = 0` (missing) | Router's own AS field is empty |
 
-**sFlow ASN Enricher** intercepts sFlow packets, identifies flows where:
-- Source IP matches your network prefixes (e.g., `185.54.80.0/22`)
-- Current `SrcAS = 0` (or configurable match value)
+### The Solution
 
-And enriches them by setting `SrcAS` to your actual AS number (e.g., `AS202032`) before forwarding.
-
-## How It Works
-
-```mermaid
-flowchart LR
-    subgraph HW["Huawei NetEngine 8000"]
-        direction TB
-        IF[/"100GE Interfaces"\]
-        SF["sFlow Agent"]
-        IF --> SF
-    end
-
-    subgraph Problem["The Problem"]
-        direction TB
-        P1["Traffic from 185.54.80.x"]
-        P2["SrcAS = 0 ❌"]
-        P1 --> P2
-    end
-
-    subgraph Enricher["sFlow ASN Enricher"]
-        direction TB
-        RX["Receive sFlow"]
-        CHK{"SrcIP in<br/>185.54.80.0/22?"}
-        MOD["Set SrcAS = 202032"]
-        FWD["Forward"]
-        RX --> CHK
-        CHK -->|Yes| MOD
-        CHK -->|No| FWD
-        MOD --> FWD
-    end
-
-    subgraph Solution["The Solution"]
-        direction TB
-        S1["Traffic from 185.54.80.x"]
-        S2["SrcAS = 202032 ✅"]
-        S1 --> S2
-    end
-
-    HW -->|"UDP :6343"| Enricher
-    Enricher -->|"Enriched sFlow"| C1["Cloudflare Magic Transit"]
-    Enricher -->|"Enriched sFlow"| C2["Noction Flow Analyzer"]
+```
+┌─────────────────┐         ┌─────────────────────┐         ┌─────────────────┐
+│  NetEngine 8000 │  sFlow  │   sFlow Enricher    │  sFlow  │    Collector    │
+│                 │────────►│                     │────────►│                 │
+│  SrcAS=0        │  UDP    │  SrcAS=64512        │  UDP    │  Collector A    │
+│  SrcPeerAS=0    │  :6343  │  SrcPeerAS=64512    │  :6343  │  Collector B    │
+│  RouterAS=0     │         │  RouterAS=64512     │         │                 │
+│  DstASPath=[]   │         │  DstASPath=[64512]  │         │                 │
+└─────────────────┘         └─────────────────────┘         └─────────────────┘
 ```
 
-## Architecture
-
-```mermaid
-flowchart TB
-    subgraph Network["Network Infrastructure"]
-        NE8000["Huawei NetEngine 8000<br/>sFlow Agent<br/>Rate: 1:1000"]
-    end
-
-    subgraph Enricher["sFlow ASN Enricher Server"]
-        direction TB
-
-        subgraph Input["Input Layer"]
-            UDP["UDP Listener<br/>0.0.0.0:6343<br/>Buffer: 4MB"]
-            WL["Whitelist Filter"]
-        end
-
-        subgraph Processing["Processing Layer"]
-            PARSE["sFlow v5 Parser"]
-            EXTRACT["Extract SrcIP from<br/>Raw Packet Header"]
-            MATCH["Match Against<br/>Enrichment Rules"]
-            MODIFY["Modify SrcAS in<br/>Extended Gateway Record"]
-        end
-
-        subgraph Output["Output Layer"]
-            POOL["Buffer Pool"]
-            FWD["Multi-Destination<br/>Forwarder"]
-            HC["Health Checker<br/>30s interval"]
-        end
-
-        subgraph API["HTTP API :8080"]
-            H["/health"]
-            S["/status"]
-            M["/metrics"]
-        end
-
-        UDP --> WL --> PARSE --> EXTRACT --> MATCH --> MODIFY --> POOL --> FWD
-        HC -.-> FWD
-    end
-
-    subgraph Collectors["Downstream Collectors"]
-        CF["Cloudflare Magic Transit<br/>162.159.65.x:6343"]
-        NC["Noction Flow Analyzer<br/>208.122.196.x:6343"]
-        OT["Other Collectors"]
-    end
-
-    subgraph Monitoring["Monitoring Stack"]
-        PROM["Prometheus"]
-        GRAF["Grafana"]
-        TG["Telegram Alerts"]
-    end
-
-    NE8000 -->|"sFlow UDP"| UDP
-    FWD --> CF & NC & OT
-    M --> PROM --> GRAF
-    Enricher -.-> TG
-```
+---
 
 ## Features
 
-### Core Functionality
+### Core Capabilities
 
 | Feature | Description |
 |---------|-------------|
-| **ASN Enrichment** | Modify `SrcAS` field in Extended Gateway records based on source IP prefix matching |
-| **Multi-Destination Forwarding** | Send enriched sFlow to multiple collectors simultaneously (Cloudflare, Noction, etc.) |
-| **sFlow v5 Full Support** | Parse and modify Flow Samples, Expanded Flow Samples, Raw Packet Headers, Extended Gateway |
-| **IPv4 and IPv6** | Enrichment rules support both IPv4 prefixes (e.g., `185.54.80.0/22`) and IPv6 (e.g., `2a02:4460::/32`) |
-| **Conditional Matching** | Only enrich when `SrcAS` equals specific value (default: 0) or force overwrite |
+| **SrcAS Enrichment** | In-place modification of Source AS field for outbound traffic |
+| **SrcPeerAS Enrichment** | Sets SrcPeerAS to router's own AS when SrcPeerAS=0 (locally-originated traffic) |
+| **RouterAS Enrichment** | Sets router's own AS field when RouterAS=0 (inbound traffic) |
+| **DstAS Enrichment** | XDR-compliant insertion of Destination AS path segment for inbound traffic |
+| **Multi-Sample Support** | Correct handling of datagrams with multiple flow samples |
+| **Dual-Stack** | Full IPv4 and IPv6 support |
 
-### Reliability & Operations
+### Operational Features
 
 | Feature | Description |
 |---------|-------------|
-| **Hot-Reload Configuration** | Update enrichment rules without restart via `SIGHUP` or `systemctl reload` |
-| **Destination Health Checks** | Monitor collector availability every 30 seconds with automatic status tracking |
-| **Automatic Failover** | Redirect traffic to backup collector when primary becomes unavailable |
-| **Source IP Whitelist** | Accept sFlow only from authorized router IPs (security hardening) |
-| **Graceful Shutdown** | Complete in-flight packet processing before exit |
+| **Multi-Destination** | Forward to multiple collectors simultaneously |
+| **Hot-Reload** | Configuration reload without service restart (SIGHUP) |
+| **Health Checks** | Automatic destination monitoring with configurable failover |
+| **Source Whitelist** | Accept sFlow only from authorized sources |
 
 ### Observability
 
 | Feature | Description |
 |---------|-------------|
-| **Prometheus Metrics** | Native `/metrics` endpoint with counters, gauges, and per-destination statistics |
-| **JSON Status API** | Real-time statistics via `/status` endpoint for integration with monitoring tools |
-| **Health Endpoint** | Simple `/health` returning `OK` or `DEGRADED` for load balancer probes |
-| **Structured Logging** | JSON log format for ELK/Loki/Splunk integration; configurable log levels |
-| **Telegram Alerts** | Instant notifications for startup, shutdown, and destination failures |
+| **Prometheus Metrics** | `/metrics` endpoint for monitoring |
+| **HTTP Status API** | `/status` endpoint with JSON statistics |
+| **Health Endpoint** | `/health` for load balancer integration |
+| **Telegram Alerts** | Real-time notifications with IPv6/IPv4 fallback and rate limiting |
+| **Structured Logging** | JSON or text format for ELK/Loki integration |
+| **Live Dashboard** | `sflow-monitor` ASCII dashboard with sparklines and flow diagram |
 
-### Performance Optimizations
+### Reliability
 
 | Feature | Description |
 |---------|-------------|
-| **Zero-Copy Buffer Pool** | Reuse packet buffers to minimize GC pressure and memory allocations |
-| **Async I/O** | Dedicated goroutines for receiving, processing, and forwarding |
-| **Socket Buffer Tuning** | 4MB receive buffer, 2MB send buffer per destination |
-| **Minimal Parsing** | Only parse required sFlow records, skip irrelevant data |
+| **Systemd Integration** | Type=notify with watchdog support |
+| **Auto-Restart** | Automatic recovery from crashes |
+| **Mission-Critical Config** | Nice=-10, CPUWeight=200 for priority scheduling |
+| **Graceful Shutdown** | Clean termination with notification delivery |
 
-## Performance Benchmarks
+---
 
-Tested on Ubuntu 24.04 LTS, Intel Xeon E-2288G, 32GB RAM:
+## Architecture
 
-| Metric | Value | Notes |
-|--------|-------|-------|
-| **Throughput** | 150,000+ pkt/s | Sustained with enrichment enabled |
-| **Latency** | < 500µs | End-to-end processing time |
-| **Memory Usage** | 12-18 MB | Stable under load |
-| **CPU Usage** | < 3% | Single core on Xeon E-2288G |
-| **Packet Loss** | 0% | With properly sized socket buffers |
+```
+                              ┌──────────────────────────────────────────┐
+                              │           sFlow ASN Enricher             │
+                              │                                          │
+┌─────────────┐   UDP:6343    │  ┌────────────────────────────────────┐  │
+│ NetEngine   │──────────────►│  │         Packet Pipeline            │  │
+│ 8000 M14    │               │  │                                    │  │
+│             │               │  │  ┌──────┐  ┌──────┐  ┌──────────┐  │  │
+│ sFlow Agent │               │  │  │Parse │─►│Match │─►│ Enrich   │  │  │
+│ 10.0.0.1    │               │  │  │sFlow │  │Rules │  │SrcAS/Dst │  │  │
+└─────────────┘               │  │  │  v5  │  │      │  │PeerAS/   │  │  │
+                              │  │  │      │  │      │  │RouterAS  │  │  │
+                              │  │  └──────┘  └──────┘  └────┬─────┘  │  │
+                              │  │                           │        │  │
+                              │  └───────────────────────────┼────────┘  │
+                              │                              │           │
+                              │  ┌─────────────────┐         │           │
+                              │  │   HTTP API      │         │           │
+                              │  │   :8080         │         │           │
+                              │  │  /metrics       │         │           │
+                              │  │  /status        │         │           │
+                              │  │  /health        │         │           │
+                              │  └─────────────────┘         │           │
+                              └──────────────────────────────┼───────────┘
+                                                             │
+                               ┌─────────────────────────────┼────────────────────┐
+                               │                             │                    │
+                               ▼                             ▼                    ▼
+                    ┌─────────────────────┐     ┌─────────────────────┐     ┌─────────┐
+                    │  Primary Collector  │     │  Secondary          │     │  Other  │
+                    │                     │     │  Collector          │     │         │
+                    │  198.51.100.1:6343  │     │  198.51.100.2:6343  │     │         │
+                    └─────────────────────┘     └─────────────────────┘     └─────────┘
+```
 
-## Requirements
+---
 
-| Component | Requirement |
+## Technical Specifications
+
+### Protocol Compliance
+
+This implementation is based on extensive research of the following specifications:
+
+| Specification | Description | Reference |
+|---------------|-------------|-----------|
+| **sFlow v5** | sFlow Datagram Version 5 | [sflow.org/SFLOW-DATAGRAM5.txt](https://sflow.org/SFLOW-DATAGRAM5.txt) |
+| **RFC 4506** | XDR: External Data Representation | [RFC 4506](https://www.rfc-editor.org/rfc/rfc4506) |
+| **RFC 3176** | InMon Corporation's sFlow | [RFC 3176](https://datatracker.ietf.org/doc/rfc3176/) |
+
+### sFlow v5 Datagram Structure
+
+Based on the official sFlow specification:
+
+```c
+struct sample_datagram_v5 {
+   address agent_address;        // IP address of sampling agent
+   unsigned int sub_agent_id;    // Distinguishes datagram streams
+   unsigned int sequence_number; // Incremented with each datagram
+   unsigned int uptime;          // Milliseconds since boot
+   sample_record samples<>;      // Variable-length array of samples
+};
+
+struct sample_record {
+   data_format sample_type;      // 4 bytes: enterprise << 12 | format
+   opaque sample_data<>;         // Variable-length opaque data (XDR)
+};
+```
+
+### Extended Gateway Record (Type 1003)
+
+The core structure modified by this enricher:
+
+```c
+struct extended_gateway {
+   address nexthop;              // Next hop router address
+   unsigned int as;              // Router's own AS          ◄── RouterAS enrichment
+   unsigned int src_as;          // Source AS from routing   ◄── SrcAS enrichment
+   unsigned int src_peer_as;     // Source peer AS           ◄── SrcPeerAS enrichment
+   as_path_type dst_as_path<>;   // AS path to destination   ◄── DstAS enrichment
+   unsigned int communities<>;   // BGP communities
+   unsigned int localpref;       // Local preference
+};
+
+struct as_path_type {
+   as_path_segment_type type;    // AS_SET=1, AS_SEQUENCE=2
+   unsigned int as_number<>;     // Array of AS numbers
+};
+```
+
+### XDR Encoding (RFC 4506)
+
+The enricher strictly follows XDR encoding rules:
+
+| Principle | Description |
 |-----------|-------------|
-| **Operating System** | Linux (Ubuntu 22.04/24.04 LTS, Debian 12, RHEL 9) |
-| **Go** | 1.21+ (compilation only, not required at runtime) |
-| **Network** | UDP port 6343 inbound from router(s) |
-| **Firewall** | Outbound UDP to collector IPs on port 6343 |
-| **Resources** | 1 CPU core, 64 MB RAM minimum |
+| **4-byte alignment** | All data elements aligned to 32-bit boundaries |
+| **Big-endian** | Network byte order for all multi-byte values |
+| **Variable-length opaque** | Length prefix (4 bytes) + data + padding (0-3 bytes) |
+
+**Variable-Length Opaque Data Encoding:**
+
+```
++--------+--------+--------+--------+
+|    length n (4 bytes, unsigned)   |
++--------+--------+--------+--------+
+|     byte 0     |     byte 1       |
++--------+--------+--------+--------+
+|       ...      |     byte n-1     |
++--------+--------+--------+--------+
+|    padding (0-3 bytes of zeros)   |
++--------+--------+--------+--------+
+```
+
+### Enrichment Implementation
+
+**SrcAS enrichment** (outbound traffic):
+- Modification is **in-place** (no packet resize)
+- SrcAS field at fixed offset within Extended Gateway record
+- Simply overwrites 4 bytes when `SrcAS=0` and source IP matches rule
+
+**SrcPeerAS enrichment** (outbound traffic):
+- Modification is **in-place** (no packet resize)
+- SrcPeerAS field at offset: NextHopType(4) + NextHop(4|16) + AS(4) + SrcAS(4)
+- Sets SrcPeerAS to router's own AS when `SrcPeerAS=0` (locally-originated traffic)
+
+**RouterAS enrichment** (inbound/outbound traffic):
+- Modification is **in-place** (no packet resize)
+- AS field at offset: NextHopType(4) + NextHop(4|16)
+- Sets router's own AS when `RouterAS=0` (only enriches when the field is empty)
+
+**DstAS enrichment** (inbound traffic):
+- Requires **packet resize** (+12 bytes per enriched sample)
+- Inserts AS_SEQUENCE segment with the following structure:
+
+```
+DstAS Insertion: 12 bytes total (XDR-compliant)
+┌────────────────┬────────────────┬────────────────┐
+│  Segment Type  │ Segment Length │   ASN Value    │
+│   (4 bytes)    │   (4 bytes)    │   (4 bytes)    │
+│  AS_SEQUENCE=2 │      1         │    64512       │
+└────────────────┴────────────────┴────────────────┘
+```
+
+- Updates `DstASPathLen`: 0 → 1
+- Updates `record_length`: +12 bytes
+- Updates `sample_length`: +12 bytes
+- **Critical**: Samples processed in reverse order to maintain offset integrity
+
+### Multi-Sample Handling
+
+sFlow datagrams can contain multiple samples. When inserting bytes for DstAS:
+
+```
+Problem: Forward processing corrupts subsequent offsets
+
+┌─────────┐     ┌─────────┐     ┌─────────┐
+│Sample[0]│     │Sample[1]│     │Sample[2]│
+│@off 100 │     │@off 300 │     │@off 500 │
+└─────────┘     └─────────┘     └─────────┘
+
+After inserting 12 bytes at Sample[0]:
+- Sample[1] stored offset (300) → INVALID! (now at 312)
+- Sample[2] stored offset (500) → INVALID! (now at 512)
+
+Solution: Reverse-order processing
+
+Process Sample[2] first (offset 500):
+  → Insert 12 bytes at 500
+  → Sample[0] offset 100 ✓ VALID (100 < 500)
+  → Sample[1] offset 300 ✓ VALID (300 < 500)
+
+Process Sample[1] next (offset 300):
+  → Insert 12 bytes at 300
+  → Sample[0] offset 100 ✓ VALID (100 < 300)
+
+Process Sample[0] last (offset 100):
+  → Insert 12 bytes at 100
+  → COMPLETE ✓
+```
+
+This approach guarantees mathematical correctness with zero additional overhead
+
+---
 
 ## Installation
 
-### Build from Source
+### From Source
 
 ```bash
 # Clone repository
 git clone https://github.com/paolokappa/sFlow_Enrichment_Integration_Huawei.git
-cd sFlow_Enrichment_Integration_Huawei
+cd sFlow_Enrichment_Integration_Huawei/sflow-enricher
 
-# Build binary
-make build
+# Build (enricher + monitor)
+make all
 
-# Install (binary + config + systemd)
+# Install (binaries + config + systemd)
 sudo make install
 
-# Enable and start service
-sudo systemctl enable --now sflow-asn-enricher
+# Enable and start
+sudo systemctl enable --now sflow-enricher
 ```
 
 ### Verify Installation
 
 ```bash
-# Check version
-sflow-asn-enricher -version
-# Output: sflow-asn-enricher version 2.0.0
-
 # Check service status
-systemctl status sflow-asn-enricher
+systemctl status sflow-enricher
 
-# Verify health endpoint
-curl -s http://127.0.0.1:8080/health
-# Output: OK
+# Check version
+sflow-enricher -version
 
-# Check statistics
-curl -s http://127.0.0.1:8080/status | jq .
+# Health check
+curl http://127.0.0.1:8080/health
 ```
 
 ### Installed Files
 
 | Path | Description |
 |------|-------------|
-| `/usr/local/bin/sflow-asn-enricher` | Executable binary (statically linked) |
-| `/etc/sflow-asn-enricher/config.yaml` | Configuration file |
-| `/etc/systemd/system/sflow-asn-enricher.service` | Systemd unit with security hardening |
+| `/usr/local/bin/sflow-enricher` | Enricher binary |
+| `/usr/local/bin/sflow-monitor` | Monitor dashboard binary |
+| `/etc/sflow-enricher/config.yaml` | Configuration file |
+| `/etc/systemd/system/sflow-enricher.service` | Systemd unit |
+
+---
 
 ## Configuration
 
-Configuration file: `/etc/sflow-asn-enricher/config.yaml`
+Configuration file: `/etc/sflow-enricher/config.yaml`
+
+### Minimal Example
+
+```yaml
+listen:
+  address: "0.0.0.0"
+  port: 6343
+
+destinations:
+  - name: "collector"
+    address: "192.168.1.100"
+    port: 6343
+    enabled: true
+
+enrichment:
+  rules:
+    - name: "my-network"
+      network: "10.0.0.0/8"
+      match_as: 0
+      set_as: 64512
+```
 
 ### Production Example
 
 ```yaml
-# sFlow ASN Enricher Configuration
-# For Huawei NetEngine 8000 integration
-
 listen:
   address: "0.0.0.0"
   port: 6343
 
 http:
   enabled: true
-  address: "127.0.0.1"  # Bind to localhost for security
+  address: "127.0.0.1"
   port: 8080
 
-# Downstream sFlow collectors
 destinations:
-  - name: "cloudflare-magic-transit"
-    address: "162.159.65.1"
+  - name: "primary-collector"
+    address: "198.51.100.1"
     port: 6343
     enabled: true
     primary: true
 
-  - name: "noction-flow-analyzer"
-    address: "208.122.196.72"
+  - name: "secondary-collector"
+    address: "198.51.100.2"
     port: 6343
     enabled: true
     primary: true
 
-# ASN enrichment rules
-# When SrcIP matches network AND SrcAS equals match_as, set SrcAS to set_as
 enrichment:
   rules:
-    - name: "company-ipv4-primary"
-      network: "185.54.80.0/22"      # Your IPv4 allocation
-      match_as: 0                     # Only enrich if SrcAS is 0
-      set_as: 202032                  # Your AS number
-      overwrite: false                # Don't overwrite if already set
-
-    - name: "company-ipv6"
-      network: "2a02:4460::/32"       # Your IPv6 allocation
+    - name: "my-network-ipv4"
+      network: "203.0.113.0/24"
       match_as: 0
-      set_as: 202032
+      set_as: 64512
       overwrite: false
 
-# Security: only accept sFlow from known routers
+    - name: "my-network-ipv6"
+      network: "2001:db8::/32"
+      match_as: 0
+      set_as: 64512
+      overwrite: false
+
 security:
   whitelist_enabled: true
   whitelist_sources:
-    - "185.54.80.2"      # NetEngine 8000 management IP
-    - "10.255.0.0/24"    # Internal router loopbacks
+    - "10.0.0.1"
 
-# Logging configuration
 logging:
-  level: "info"          # debug, info, warn, error
-  format: "json"         # "text" or "json"
-  stats_interval: 60     # Log statistics every 60 seconds
-
-# Optional: Telegram notifications
-telegram:
-  enabled: true
-  bot_token: "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
-  chat_id: "-1001234567890"
-  alert_on:
-    - "startup"
-    - "shutdown"
-    - "destination_down"
+  level: "info"
+  format: "text"
+  stats_interval: 60
 ```
-
-### Configuration Reference
-
-| Section | Parameter | Type | Default | Description |
-|---------|-----------|------|---------|-------------|
-| `listen` | `address` | string | `0.0.0.0` | Bind address for sFlow listener |
-| `listen` | `port` | int | `6343` | UDP port for sFlow |
-| `http` | `enabled` | bool | `false` | Enable HTTP API |
-| `http` | `address` | string | `127.0.0.1` | HTTP bind address |
-| `http` | `port` | int | `8080` | HTTP port |
-| `destinations[]` | `name` | string | required | Unique identifier |
-| `destinations[]` | `address` | string | required | Collector IP/hostname |
-| `destinations[]` | `port` | int | required | Collector port |
-| `destinations[]` | `enabled` | bool | `false` | Enable destination |
-| `destinations[]` | `primary` | bool | `false` | Primary destination flag |
-| `destinations[]` | `failover` | string | `""` | Failover destination name |
-| `enrichment.rules[]` | `name` | string | required | Rule identifier |
-| `enrichment.rules[]` | `network` | string | required | CIDR prefix to match |
-| `enrichment.rules[]` | `match_as` | uint32 | required | SrcAS value to match |
-| `enrichment.rules[]` | `set_as` | uint32 | required | New SrcAS value |
-| `enrichment.rules[]` | `overwrite` | bool | `false` | Ignore match_as, always set |
-| `security` | `whitelist_enabled` | bool | `false` | Enable source whitelist |
-| `security` | `whitelist_sources` | []string | `[]` | Allowed source IPs/CIDRs |
-| `logging` | `level` | string | `info` | Log level |
-| `logging` | `format` | string | `text` | Log format (text/json) |
-| `logging` | `stats_interval` | int | `60` | Stats log interval (seconds) |
 
 For complete configuration reference, see [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
-## Huawei NetEngine Configuration
+---
 
-### Enable sFlow on NetEngine 8000
-
-```
-# Enter system view
-system-view
-
-# Configure sFlow agent
-sflow agent ip 185.54.80.2
-
-# Configure sFlow collector (this enricher)
-sflow collector 1 ip 185.54.81.40 port 6343
-
-# Enable sFlow on interfaces
-interface 100GE0/1/0
-  sflow sampling-rate 1000
-  sflow flow-sampling inbound
-  sflow counter-sampling interval 60
-
-interface 100GE0/1/1
-  sflow sampling-rate 1000
-  sflow flow-sampling inbound
-  sflow counter-sampling interval 60
-
-# Commit configuration
-commit
-```
-
-### Verify sFlow is Active
-
-```
-display sflow statistics
-display sflow configuration
-```
-
-## HTTP API
-
-### Endpoints
-
-| Endpoint | Method | Response | Description |
-|----------|--------|----------|-------------|
-| `/health` | GET | `OK` / `DEGRADED` | Health check (HTTP 200/503) |
-| `/status` | GET | JSON | Detailed statistics and state |
-| `/metrics` | GET | Prometheus | Prometheus-compatible metrics |
-
-### GET /status Example
-
-```bash
-curl -s http://127.0.0.1:8080/status | jq .
-```
-
-```json
-{
-  "version": "2.0.0",
-  "uptime": "4h23m12s",
-  "stats": {
-    "packets_received": 1542893,
-    "packets_forwarded": 3085786,
-    "packets_enriched": 892451,
-    "packets_dropped": 0,
-    "packets_filtered": 127,
-    "bytes_received": 523891204,
-    "bytes_forwarded": 1047782408
-  },
-  "destinations": [
-    {
-      "name": "cloudflare-magic-transit",
-      "address": "162.159.65.1:6343",
-      "healthy": true,
-      "packets_sent": 1542893,
-      "packets_dropped": 0,
-      "last_error": ""
-    },
-    {
-      "name": "noction-flow-analyzer",
-      "address": "208.122.196.72:6343",
-      "healthy": true,
-      "packets_sent": 1542893,
-      "packets_dropped": 0,
-      "last_error": ""
-    }
-  ]
-}
-```
-
-### Prometheus Metrics
-
-```bash
-curl -s http://127.0.0.1:8080/metrics
-```
-
-```prometheus
-# HELP sflow_asn_enricher_packets_received_total Total sFlow packets received
-# TYPE sflow_asn_enricher_packets_received_total counter
-sflow_asn_enricher_packets_received_total 1542893
-
-# HELP sflow_asn_enricher_packets_enriched_total Packets where SrcAS was modified
-# TYPE sflow_asn_enricher_packets_enriched_total counter
-sflow_asn_enricher_packets_enriched_total 892451
-
-# HELP sflow_asn_enricher_destination_healthy Destination health status (1=healthy, 0=unhealthy)
-# TYPE sflow_asn_enricher_destination_healthy gauge
-sflow_asn_enricher_destination_healthy{destination="cloudflare-magic-transit"} 1
-sflow_asn_enricher_destination_healthy{destination="noction-flow-analyzer"} 1
-
-# HELP sflow_asn_enricher_uptime_seconds Service uptime in seconds
-# TYPE sflow_asn_enricher_uptime_seconds gauge
-sflow_asn_enricher_uptime_seconds 15792
-```
-
-For complete API documentation, see [docs/API.md](docs/API.md).
-
-## Operations
+## Usage
 
 ### Service Management
 
 ```bash
-# Start service
-sudo systemctl start sflow-asn-enricher
+# Start/Stop/Restart
+sudo systemctl start sflow-enricher
+sudo systemctl stop sflow-enricher
+sudo systemctl restart sflow-enricher
 
-# Stop service
-sudo systemctl stop sflow-asn-enricher
+# Hot-reload configuration
+sudo systemctl reload sflow-enricher
 
-# Restart service
-sudo systemctl restart sflow-asn-enricher
-
-# Hot-reload configuration (no packet loss)
-sudo systemctl reload sflow-asn-enricher
-
-# View real-time logs
-journalctl -u sflow-asn-enricher -f
-
-# View recent logs
-journalctl -u sflow-asn-enricher -n 100 --no-pager
+# View logs
+journalctl -u sflow-enricher -f
 ```
 
 ### Debug Mode
 
 ```bash
-# Stop service first
-sudo systemctl stop sflow-asn-enricher
-
-# Run in foreground with debug logging
-/usr/local/bin/sflow-asn-enricher -config /etc/sflow-asn-enricher/config.yaml -debug
-
-# Example debug output:
-# [DEBUG] Enriching packet src_ip=185.54.80.30 old_as=0 new_as=202032 rule=company-ipv4-primary
-# [DEBUG] Forwarding to cloudflare-magic-transit (162.159.65.1:6343)
-# [DEBUG] Forwarding to noction-flow-analyzer (208.122.196.72:6343)
+# Stop service and run manually with debug
+sudo systemctl stop sflow-enricher
+/usr/local/bin/sflow-enricher -config /etc/sflow-enricher/config.yaml -debug
 ```
 
-### Verify Enrichment is Working
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Returns `OK` or `DEGRADED` |
+| `/status` | GET | JSON statistics |
+| `/metrics` | GET | Prometheus format |
 
 ```bash
-# Check statistics - packets_enriched should increase
-watch -n 5 'curl -s http://127.0.0.1:8080/status | jq "{received: .stats.packets_received, enriched: .stats.packets_enriched, ratio: (.stats.packets_enriched / .stats.packets_received * 100 | tostring + \"%\")}"'
+# Health check
+curl http://127.0.0.1:8080/health
 
-# Capture sFlow traffic
-tcpdump -i any udp port 6343 -c 10 -nn
+# Statistics
+curl -s http://127.0.0.1:8080/status | jq .
+
+# Prometheus metrics
+curl http://127.0.0.1:8080/metrics
 ```
 
-For complete operations guide, see [docs/OPERATIONS.md](docs/OPERATIONS.md).
+---
 
-## Monitoring Integration
+## sflow-monitor
 
-### Prometheus + Grafana
+Real-time ASCII dashboard for monitoring the sFlow Enricher.
 
-Add to `prometheus.yml`:
+### Quick Start
 
-```yaml
-scrape_configs:
-  - job_name: 'sflow-asn-enricher'
-    static_configs:
-      - targets: ['sflow-enricher.example.com:8080']
-    metrics_path: /metrics
-    scrape_interval: 15s
+```bash
+# Build
+make build-monitor
+
+# Run (connects to local enricher API)
+sflow-monitor
+
+# Custom URL and interval
+sflow-monitor -url http://192.168.1.100:8080 -interval 5
+
+# No colors (for logging/piping)
+sflow-monitor -no-color
 ```
 
-### Key Metrics to Monitor
+### Dashboard Features
 
-| Metric | Alert Condition | Description |
-|--------|-----------------|-------------|
-| `sflow_asn_enricher_packets_dropped_total` | `> 0` | Packets failed to forward |
-| `sflow_asn_enricher_destination_healthy` | `== 0` | Collector is unreachable |
-| `sflow_asn_enricher_uptime_seconds` | Reset detected | Service crashed/restarted |
-| `rate(sflow_asn_enricher_packets_received_total[5m])` | `< threshold` | Traffic drop from router |
+| Feature | Description |
+|---------|-------------|
+| **Packet/Byte rates** | Real-time pps and KB/s with sparkline graphs |
+| **Enrichment stats** | Percentage bars for enriched/dropped/filtered |
+| **Enrichment rules** | Table with Name, Network, SrcAS, DstAS, Condition |
+| **Flow diagram** | Visual source -> enricher -> destinations with addresses |
+| **Destination table** | Health status, packets sent, drops, errors |
+| **Totals** | Cumulative counters with human-readable formatting |
+| **Dynamic sizing** | Frame auto-sizes to widest content at every refresh |
+| **Auto-reconnect** | Shows DISCONNECTED state and retries automatically |
 
-### Grafana Dashboard Queries
+### Installation
 
-```promql
-# Packets per second
-rate(sflow_asn_enricher_packets_received_total[1m])
+```bash
+# Install alongside sflow-enricher
+sudo make install
 
-# Enrichment ratio (%)
-rate(sflow_asn_enricher_packets_enriched_total[5m]) / rate(sflow_asn_enricher_packets_received_total[5m]) * 100
+# Or install manually
+sudo install -m 755 build/sflow-monitor /usr/local/bin/sflow-monitor
 
-# Per-destination throughput
-rate(sflow_asn_enricher_destination_packets_sent_total[1m])
+# Static build (no dependencies)
+make build-static
 ```
 
-## Technical Details
-
-### sFlow v5 Protocol Support
-
-This implementation parses and modifies sFlow v5 datagrams according to the [sFlow Version 5 Specification](https://sflow.org/sflow_version_5.txt).
-
-**Supported Record Types:**
-
-| Record Type | Enterprise | Format | Purpose |
-|-------------|------------|--------|---------|
-| Flow Sample | 0 | 1 | Standard flow sample container |
-| Expanded Flow Sample | 0 | 3 | Extended flow sample with 32-bit ifIndex |
-| Raw Packet Header | 0 | 1 | Contains sampled packet (Ethernet/IP headers) |
-| Extended Gateway | 0 | 1003 | **Contains SrcAS field (modification target)** |
-
-**Processing Flow:**
-
-1. Parse sFlow v5 datagram header (version, agent IP, sequence, samples count)
-2. Iterate through flow samples
-3. Extract source IP from Raw Packet Header record (parse Ethernet → IP header)
-4. Locate Extended Gateway record
-5. If source IP matches enrichment rule and SrcAS matches condition → modify SrcAS
-6. Recalculate checksums if needed
-7. Forward modified datagram to all destinations
-
-## Project Structure
-
-```
-sFlow_Enrichment_Integration_Huawei/
-├── cmd/sflow-asn-enricher/
-│   └── main.go                 # Application entry point, CLI flags, signal handling
-├── internal/
-│   ├── config/
-│   │   └── config.go           # YAML configuration parsing, hot-reload support
-│   └── sflow/
-│       └── sflow.go            # sFlow v5 parser, Extended Gateway modification
-├── docs/
-│   ├── API.md                  # HTTP API reference
-│   ├── CONFIGURATION.md        # Configuration parameter reference
-│   └── OPERATIONS.md           # Operations and troubleshooting guide
-├── systemd/
-│   └── sflow-asn-enricher.service  # Systemd unit with security hardening
-├── config.yaml                 # Example configuration
-├── Makefile                    # Build, install, uninstall targets
-├── go.mod                      # Go module definition
-├── go.sum                      # Dependency checksums
-├── LICENSE                     # MIT License
-└── README.md                   # This file
-```
+---
 
 ## Documentation
 
 | Document | Description |
 |----------|-------------|
-| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Complete configuration parameter reference |
-| [docs/API.md](docs/API.md) | HTTP API endpoints and Prometheus metrics |
-| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Installation, troubleshooting, performance tuning |
-
-## Author
-
-| | |
-|---|---|
-| **Name** | Paolo Caparrelli |
-| **Company** | GOLINE SA |
-| **Email** | soc@goline.ch |
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-```
-MIT License - Copyright (c) 2026 GOLINE SA
-```
-
-## Acknowledgments
-
-- [sFlow.org](https://sflow.org/) for the sFlow v5 specification
-- Huawei NetEngine documentation for sFlow agent configuration
+| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Complete configuration reference |
+| [docs/API.md](docs/API.md) | HTTP API documentation |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Operational guide and troubleshooting |
+| [docs/MULTI_SAMPLE_FIX_RESEARCH.md](docs/MULTI_SAMPLE_FIX_RESEARCH.md) | Technical research on multi-sample handling |
+| [docs/SYSTEMD_INTEGRATION.md](docs/SYSTEMD_INTEGRATION.md) | Systemd notify and watchdog integration |
+| [docs/TELEGRAM_NOTIFICATIONS.md](docs/TELEGRAM_NOTIFICATIONS.md) | Telegram alerting configuration |
+| [CHANGELOG.md](CHANGELOG.md) | Version history and changes |
 
 ---
 
+## Performance
+
+Tested on Ubuntu 24.04 LTS:
+
+| Metric | Value |
+|--------|-------|
+| **Throughput** | >100,000 packets/second |
+| **Latency** | <1ms processing time |
+| **Memory** | ~10-20 MB stable |
+| **CPU** | <5% single core |
+
+---
+
+## References
+
+### Official Specifications
+- [sFlow Version 5 Specification](https://sflow.org/sflow_version_5.txt)
+- [sFlow Datagram Structure](https://sflow.org/SFLOW-DATAGRAM5.txt)
+- [RFC 4506 - XDR Encoding](https://www.rfc-editor.org/rfc/rfc4506)
+- [RFC 3176 - sFlow Original](https://datatracker.ietf.org/doc/rfc3176/)
+
+### Implementation References
+- [Google gopacket sflow.go](https://github.com/google/gopacket/blob/master/layers/sflow.go)
+- [Cistern/sflow - Go encoder/decoder](https://github.com/Cistern/sflow)
+- [Cloudflare goflow2](https://github.com/netsampler/goflow2)
+
+### Systemd Documentation
+- [systemd.service(5)](https://www.freedesktop.org/software/systemd/man/systemd.service.html)
+- [sd_notify(3)](https://www.freedesktop.org/software/systemd/man/sd_notify.html)
+
+---
+
+## Project Structure
+
+```
+sflow-enricher/
+├── cmd/
+│   ├── sflow-enricher/
+│   │   └── main.go              # Enricher entry point
+│   └── sflow-monitor/
+│       └── main.go              # Monitor dashboard entry point
+├── internal/
+│   ├── config/
+│   │   └── config.go            # Configuration management
+│   └── sflow/
+│       └── sflow.go             # sFlow v5 parser/modifier
+├── docs/
+│   ├── CONFIGURATION.md         # Configuration reference
+│   ├── API.md                   # API documentation
+│   ├── OPERATIONS.md            # Operational guide
+│   ├── MULTI_SAMPLE_FIX_RESEARCH.md
+│   ├── SYSTEMD_INTEGRATION.md
+│   └── TELEGRAM_NOTIFICATIONS.md
+├── systemd/
+│   └── sflow-enricher.service
+├── config.yaml                  # Example configuration
+├── Makefile                     # Build automation
+├── CHANGELOG.md                 # Version history
+└── README.md                    # This file
+```
+
+---
+
+<br/>
+
 <p align="center">
-  <a href="https://www.goline.ch">
-    <img src="assets/goline-logo.png" alt="GOLINE SA" height="50">
-  </a>
-  <br>
-  <sub>Developed with ❤️ by <a href="https://www.goline.ch">GOLINE SA</a></sub>
+  <img src="assets/goline-logo.png" alt="GOLINE SA" height="60"/>
+</p>
+
+<p align="center">
+  <strong>Developed by GOLINE SA</strong><br/>
+  Swiss Network & Security Solutions
+</p>
+
+<p align="center">
+  <a href="mailto:soc@goline.ch">soc@goline.ch</a>
+</p>
+
+<p align="center">
+  <strong>Author:</strong> Paolo Caparrelli
+</p>
+
+<p align="center">
+  <sub>MIT License - GOLINE SA - 2026</sub>
+</p>
+
+<p align="center">
+  <strong>Version 2.2.1</strong> • February 2026
 </p>

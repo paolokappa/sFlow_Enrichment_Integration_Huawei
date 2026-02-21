@@ -1,4 +1,4 @@
-# sFlow ASN Enricher Configuration v2.0
+# sFlow Enricher Configuration v2.2
 # Proxy that enriches sFlow packets with ASN information
 
 # Listen address for incoming sFlow
@@ -32,6 +32,7 @@ destinations:
     primary: true
 
 # ASN enrichment rules
+# Enriches: SrcAS, SrcPeerAS, RouterAS (in-place) and DstAS (XDR insert)
 # If src_ip matches network and src_as equals 'match_as', replace with 'set_as'
 enrichment:
   rules:
@@ -69,4 +70,9 @@ telegram:
     - "startup"
     - "shutdown"
     - "destination_down"
+    - "destination_up"
     # - "high_drop_rate"
+  # drop_rate_threshold: 5.0   # Drop rate % to trigger high_drop_rate alert (default: 5.0)
+  # http_timeout: 15           # HTTP request timeout in seconds (default: 15)
+  # flap_cooldown: 300         # Seconds between alerts for same destination (default: 300)
+  # ipv6_fallback: false       # Try IPv6 first, fallback to IPv4 if it fails (default: false)

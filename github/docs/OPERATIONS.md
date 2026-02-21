@@ -5,15 +5,15 @@
 ### Build from Source
 
 ```bash
-cd sflow-asn-enricher
+cd /root/sFlow_Enrichment_Integration_Huawei/sflow-enricher
 
 # Install dependencies
 go mod download
 
-# Build
-make build
+# Build (enricher + monitor)
+make all
 
-# Install (binary + config + systemd)
+# Install (binaries + config + systemd)
 make install
 ```
 
@@ -21,9 +21,10 @@ make install
 
 | File | Path | Description |
 |------|------|-------------|
-| Binary | `/usr/local/bin/sflow-asn-enricher` | Main executable |
-| Config | `/etc/sflow-asn-enricher/config.yaml` | Configuration file |
-| Systemd | `/etc/systemd/system/sflow-asn-enricher.service` | Service unit |
+| Enricher | `/usr/local/bin/sflow-enricher` | Main enricher binary |
+| Monitor | `/usr/local/bin/sflow-monitor` | Dashboard monitor binary |
+| Config | `/etc/sflow-enricher/config.yaml` | Configuration file |
+| Systemd | `/etc/systemd/system/sflow-enricher.service` | Service unit |
 
 ---
 
@@ -33,25 +34,25 @@ make install
 
 ```bash
 # Start service
-systemctl start sflow-asn-enricher
+systemctl start sflow-enricher
 
 # Stop service
-systemctl stop sflow-asn-enricher
+systemctl stop sflow-enricher
 
 # Restart service
-systemctl restart sflow-asn-enricher
+systemctl restart sflow-enricher
 
 # Reload configuration (hot-reload)
-systemctl reload sflow-asn-enricher
+systemctl reload sflow-enricher
 
 # Enable at boot
-systemctl enable sflow-asn-enricher
+systemctl enable sflow-enricher
 
 # Disable at boot
-systemctl disable sflow-asn-enricher
+systemctl disable sflow-enricher
 
 # Check status
-systemctl status sflow-asn-enricher
+systemctl status sflow-enricher
 ```
 
 ### Hot-Reload
@@ -59,9 +60,9 @@ systemctl status sflow-asn-enricher
 Reload configuration without dropping packets:
 
 ```bash
-systemctl reload sflow-asn-enricher
+systemctl reload sflow-enricher
 # or
-kill -HUP $(pgrep sflow-asn-enricher)
+kill -HUP $(pgrep sflow-enricher)
 ```
 
 **Reloadable settings:**
@@ -77,25 +78,67 @@ kill -HUP $(pgrep sflow-asn-enricher)
 
 ---
 
+## sflow-monitor Dashboard
+
+The `sflow-monitor` tool provides a live ASCII dashboard for monitoring the enricher.
+
+### Usage
+
+```bash
+# Connect to local enricher (default http://127.0.0.1:8080)
+sflow-monitor
+
+# Custom URL and refresh interval
+sflow-monitor -url http://192.168.1.100:8080 -interval 5
+
+# No ANSI colors
+sflow-monitor -no-color
+
+# Version
+sflow-monitor -version
+```
+
+### Dashboard Sections
+
+| Section | Content |
+|---------|---------|
+| **Header** | Status, version, uptime, listen address, source IPs |
+| **Packet Flow** | In/Out/Drop rates (pps) with sparkline graphs |
+| **Bytes Flow** | In/Out rates (KB/s) with sparkline graphs |
+| **Enrichment** | Enriched/Dropped/Filtered percentage bars |
+| **Enrichment Rules** | Table with Name, Network, SetAS, Modifies (SrcAS + SrcPeerAS + DstAS + RouterAS) |
+| **Flow Diagram** | Visual [Source] -> [Enricher] -> [Destinations] with addresses |
+| **Destinations** | Table with health, packets sent, drops, errors |
+| **Totals** | Cumulative received/forwarded/enriched/dropped/bytes |
+
+The dashboard frame auto-sizes dynamically to the widest content at every refresh.
+
+### Requirements
+
+- The enricher must have `http.enabled: true` in config
+- The monitor connects to `/status` and `/health` endpoints
+
+---
+
 ## Logging
 
 ### View Logs
 
 ```bash
 # Real-time logs
-journalctl -u sflow-asn-enricher -f
+journalctl -u sflow-enricher -f
 
 # Last 100 lines
-journalctl -u sflow-asn-enricher -n 100
+journalctl -u sflow-enricher -n 100
 
 # Logs since boot
-journalctl -u sflow-asn-enricher -b
+journalctl -u sflow-enricher -b
 
 # Logs from specific time
-journalctl -u sflow-asn-enricher --since "2026-01-23 18:00:00"
+journalctl -u sflow-enricher --since "2026-01-23 18:00:00"
 
 # Logs with priority
-journalctl -u sflow-asn-enricher -p err  # errors only
+journalctl -u sflow-enricher -p err  # errors only
 ```
 
 ### Log Format
@@ -124,7 +167,7 @@ logging:
 
 ```bash
 # Service status
-systemctl is-active sflow-asn-enricher
+systemctl is-active sflow-enricher
 
 # HTTP health check
 curl -s http://127.0.0.1:8080/health
@@ -146,8 +189,8 @@ tcpdump -i any udp port 6343 -c 20 -n
 timeout 10 tcpdump -i any udp port 6343 -q 2>/dev/null | wc -l
 
 # Verify enrichment (debug mode)
-systemctl stop sflow-asn-enricher
-/usr/local/bin/sflow-asn-enricher -config /etc/sflow-asn-enricher/config.yaml -debug
+systemctl stop sflow-enricher
+/usr/local/bin/sflow-enricher -config /etc/sflow-enricher/config.yaml -debug
 ```
 
 ### Key Metrics to Monitor
@@ -167,7 +210,7 @@ systemctl stop sflow-asn-enricher
 
 **Check logs:**
 ```bash
-journalctl -u sflow-asn-enricher -n 50 --no-pager
+journalctl -u sflow-enricher -n 50 --no-pager
 ```
 
 **Common issues:**
@@ -188,7 +231,7 @@ journalctl -u sflow-asn-enricher -n 50 --no-pager
    ```
    Solution: Validate YAML syntax
    ```bash
-   python3 -c "import yaml; yaml.safe_load(open('/etc/sflow-asn-enricher/config.yaml'))"
+   python3 -c "import yaml; yaml.safe_load(open('/etc/sflow-enricher/config.yaml'))"
    ```
 
 3. **Invalid network CIDR:**
@@ -222,7 +265,7 @@ journalctl -u sflow-asn-enricher -n 50 --no-pager
 1. **Verify rule matches:**
    ```bash
    # Run in debug mode
-   /usr/local/bin/sflow-asn-enricher -config /etc/sflow-asn-enricher/config.yaml -debug
+   /usr/local/bin/sflow-enricher -config /etc/sflow-enricher/config.yaml -debug
    ```
 
 2. **Check source IP extraction:**
@@ -242,7 +285,7 @@ journalctl -u sflow-asn-enricher -n 50 --no-pager
 
 2. **Check DNS resolution:**
    ```bash
-   dig +short collector.example.com
+   dig +short 198.51.100.1
    ```
 
 3. **Check firewall outbound:**
@@ -266,7 +309,7 @@ journalctl -u sflow-asn-enricher -n 50 --no-pager
 
 2. **Check system resources:**
    ```bash
-   top -p $(pgrep sflow-asn-enricher)
+   top -p $(pgrep sflow-enricher)
    ```
 
 ---
@@ -276,23 +319,24 @@ journalctl -u sflow-asn-enricher -n 50 --no-pager
 ### Backup Configuration
 
 ```bash
-cp /etc/sflow-asn-enricher/config.yaml /etc/sflow-asn-enricher/config.yaml.bak
+cp /etc/sflow-enricher/config.yaml /etc/sflow-enricher/config.yaml.bak
 ```
 
 ### Restore Configuration
 
 ```bash
-cp /etc/sflow-asn-enricher/config.yaml.bak /etc/sflow-asn-enricher/config.yaml
-systemctl reload sflow-asn-enricher
+cp /etc/sflow-enricher/config.yaml.bak /etc/sflow-enricher/config.yaml
+systemctl reload sflow-enricher
 ```
 
 ### Full Backup
 
 ```bash
-tar -czvf sflow-asn-enricher-backup.tar.gz \
-    /etc/sflow-asn-enricher/ \
-    /usr/local/bin/sflow-asn-enricher \
-    /etc/systemd/system/sflow-asn-enricher.service
+tar -czvf sflow-enricher-backup.tar.gz \
+    /etc/sflow-enricher/ \
+    /usr/local/bin/sflow-enricher \
+    /usr/local/bin/sflow-monitor \
+    /etc/systemd/system/sflow-enricher.service
 ```
 
 ---
@@ -300,25 +344,27 @@ tar -czvf sflow-asn-enricher-backup.tar.gz \
 ## Upgrade Procedure
 
 ```bash
-cd sflow-asn-enricher
+cd /root/sFlow_Enrichment_Integration_Huawei/sflow-enricher
 
 # Pull latest code (if using git)
 git pull
 
 # Build new version
-make build
+make all
 
 # Check version
-./build/sflow-asn-enricher -version
+./build/sflow-enricher -version
+./build/sflow-monitor -version
 
 # Stop service
-systemctl stop sflow-asn-enricher
+systemctl stop sflow-enricher
 
-# Install new binary
-cp build/sflow-asn-enricher /usr/local/bin/
+# Install new binaries
+cp build/sflow-enricher /usr/local/bin/
+cp build/sflow-monitor /usr/local/bin/
 
 # Start service
-systemctl start sflow-asn-enricher
+systemctl start sflow-enricher
 
 # Verify
 curl -s http://127.0.0.1:8080/status | jq .version
@@ -329,15 +375,15 @@ curl -s http://127.0.0.1:8080/status | jq .version
 ## Uninstall
 
 ```bash
-cd sflow-asn-enricher
+cd /root/sFlow_Enrichment_Integration_Huawei/sflow-enricher
 make uninstall
 
 # Or manually:
-systemctl stop sflow-asn-enricher
-systemctl disable sflow-asn-enricher
-rm -f /etc/systemd/system/sflow-asn-enricher.service
-rm -f /usr/local/bin/sflow-asn-enricher
-rm -rf /etc/sflow-asn-enricher
+systemctl stop sflow-enricher
+systemctl disable sflow-enricher
+rm -f /etc/systemd/system/sflow-enricher.service
+rm -f /usr/local/bin/sflow-enricher
+rm -rf /etc/sflow-enricher
 systemctl daemon-reload
 ```
 
@@ -367,7 +413,7 @@ sysctl -p
 
 ### Service Limits
 
-Edit `/etc/systemd/system/sflow-asn-enricher.service`:
+Edit `/etc/systemd/system/sflow-enricher.service`:
 
 ```ini
 [Service]
@@ -378,5 +424,5 @@ LimitMEMLOCK=infinity
 Reload:
 ```bash
 systemctl daemon-reload
-systemctl restart sflow-asn-enricher
+systemctl restart sflow-enricher
 ```
