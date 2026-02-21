@@ -53,7 +53,7 @@ $ curl -s http://127.0.0.1:8080/status | jq .
 
 ```json
 {
-  "version": "2.2.0",
+  "version": "2.2.2",
   "uptime": "2h30m15s",
   "listen_address": "0.0.0.0:6343",
   "whitelist_sources": ["10.0.0.1"],

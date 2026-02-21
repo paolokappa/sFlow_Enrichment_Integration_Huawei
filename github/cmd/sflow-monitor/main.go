@@ -494,19 +494,24 @@ func renderDashboard(status *StatusResponse, health string, rates *RateCalculato
 		lines = append(lines, dline{"ENRICHMENT", cc("ENRICHMENT", cBold+cCyan)})
 
 		totalRecv := maxU64(status.Stats.PacketsReceived, 1)
-		totalFwd := maxU64(status.Stats.PacketsForwarded, 1)
-		enrichPct := float64(status.Stats.PacketsEnriched) / float64(totalFwd) * 100
+		enrichPct := float64(status.Stats.PacketsEnriched) / float64(totalRecv) * 100
 		dropPct := float64(status.Stats.PacketsDropped) / float64(totalRecv) * 100
 		filtPct := float64(status.Stats.PacketsFiltered) / float64(totalRecv) * 100
 
+		// Packets without Extended Gateway record (counter samples, no-match flows)
+		noGw := status.Stats.PacketsReceived - status.Stats.PacketsEnriched - status.Stats.PacketsDropped - status.Stats.PacketsFiltered
+		noGwPct := float64(noGw) / float64(totalRecv) * 100
+
 		barW := 40
 		enrichLabel := fmt.Sprintf("Enriched: %5.1f%%  ", enrichPct)
+		noGwLabel := fmt.Sprintf("No ExtGW: %5.1f%%  ", noGwPct)
 		dropLabel := fmt.Sprintf("Dropped:  %5.1f%%  ", dropPct)
 		filtLabel := fmt.Sprintf("Filtered: %5.1f%%  ", filtPct)
 
 		// Raw uses # for bar chars (same column width)
 		rawBar := strings.Repeat("#", barW)
 		rawEnrich := enrichLabel + "[" + rawBar + "]"
+		rawNoGw := noGwLabel + "[" + rawBar + "]"
 		rawDrop := dropLabel + "[" + rawBar + "]"
 		rawFilt := filtLabel + "[" + rawBar + "]"
 
@@ -519,12 +524,14 @@ func renderDashboard(status *StatusResponse, health string, rates *RateCalculato
 		}
 
 		colorEnrich := cc(enrichLabel, cWhite) + "[" + progressBar(enrichPct, barW, cGreen) + "]"
+		colorNoGw := cc(noGwLabel, cWhite) + "[" + progressBar(noGwPct, barW, cYellow) + "]"
 		colorDrop := cc(dropLabel, cWhite) + "[" + progressBar(dropPct, barW, dropBarColor) + "]"
 		colorFilt := cc(filtLabel, cWhite) + "[" + progressBar(filtPct, barW, cCyan) + "]"
 
 		lines = append(lines, dline{rawEnrich, colorEnrich})
-		lines = append(lines, dline{rawDrop, colorDrop})
+		lines = append(lines, dline{rawNoGw, colorNoGw})
 		lines = append(lines, dline{rawFilt, colorFilt})
+		lines = append(lines, dline{rawDrop, colorDrop})
 	}
 
 	lines = append(lines, sep())
@@ -571,8 +578,8 @@ func renderDashboard(status *StatusResponse, health string, rates *RateCalculato
 	{
 		lines = append(lines, dline{"FLOW DIAGRAM", cc("FLOW DIAGRAM", cBold+cCyan)})
 
-		totalFwd := maxU64(status.Stats.PacketsForwarded, 1)
-		enrichPct := float64(status.Stats.PacketsEnriched) / float64(totalFwd) * 100
+		totalRecv := maxU64(status.Stats.PacketsReceived, 1)
+		enrichPct := float64(status.Stats.PacketsEnriched) / float64(totalRecv) * 100
 		inRate := padL(formatPps(rates.PpsIn), 9)
 
 		srcLabel := "SOURCE"

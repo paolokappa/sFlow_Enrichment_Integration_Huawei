@@ -2,6 +2,16 @@
 
 All notable changes to the sFlow ASN Enricher project.
 
+## [2.2.2] - 2026-02-21
+
+### Fixed
+- **sflow-monitor enrichment % calculation**: Was dividing `packets_enriched / packets_forwarded` instead of `packets_enriched / packets_received`. With 2 destinations, forwarded=2×received so enrichment showed ~49.9% instead of ~99.9%
+
+### Added
+- **sflow-monitor "No ExtGW" metric**: New row in ENRICHMENT section showing percentage of packets without Extended Gateway record (counter samples, flows without BGP info). Sum of all 4 metrics now equals 100%
+- **sflow-monitor reordered bars**: Dropped moved to last position for better visual priority when issues arise
+- **docs/RFC_COMPLIANCE.md**: Complete RFC compliance certification document detailing conformance to sFlow v5, RFC 4506 (XDR), and RFC 3176
+
 ## [2.2.1] - 2026-02-21
 
 ### Fixed

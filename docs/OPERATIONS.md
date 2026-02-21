@@ -105,7 +105,7 @@ sflow-monitor -version
 | **Header** | Status, version, uptime, listen address, source IPs |
 | **Packet Flow** | In/Out/Drop rates (pps) with sparkline graphs |
 | **Bytes Flow** | In/Out rates (KB/s) with sparkline graphs |
-| **Enrichment** | Enriched/Dropped/Filtered percentage bars |
+| **Enrichment** | Enriched/No ExtGW/Filtered/Dropped percentage bars |
 | **Enrichment Rules** | Table with Name, Network, SetAS, Modifies (SrcAS + SrcPeerAS + DstAS + RouterAS) |
 | **Flow Diagram** | Visual [Source] -> [Enricher] -> [Destinations] with addresses |
 | **Destinations** | Table with health, packets sent, drops, errors |

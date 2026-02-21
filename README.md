@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="#"><img src="https://img.shields.io/badge/version-2.2.1-blue.svg" alt="Version"></a>
+  <a href="#"><img src="https://img.shields.io/badge/version-2.2.2-blue.svg" alt="Version"></a>
   <a href="#"><img src="https://img.shields.io/badge/Go-1.21+-00ADD8.svg" alt="Go"></a>
   <a href="#"><img src="https://img.shields.io/badge/sFlow-v5-orange.svg" alt="sFlow v5"></a>
   <a href="#"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License"></a>
@@ -517,6 +517,7 @@ make build-static
 | [docs/MULTI_SAMPLE_FIX_RESEARCH.md](docs/MULTI_SAMPLE_FIX_RESEARCH.md) | Technical research on multi-sample handling |
 | [docs/SYSTEMD_INTEGRATION.md](docs/SYSTEMD_INTEGRATION.md) | Systemd notify and watchdog integration |
 | [docs/TELEGRAM_NOTIFICATIONS.md](docs/TELEGRAM_NOTIFICATIONS.md) | Telegram alerting configuration |
+| [docs/RFC_COMPLIANCE.md](docs/RFC_COMPLIANCE.md) | RFC compliance certification |
 | [CHANGELOG.md](CHANGELOG.md) | Version history and changes |
 
 ---
@@ -608,5 +609,5 @@ sflow-enricher/
 </p>
 
 <p align="center">
-  <strong>Version 2.2.1</strong> • February 2026
+  <strong>Version 2.2.2</strong> • February 2026
 </p>
