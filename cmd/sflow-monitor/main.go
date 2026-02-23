@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	monitorVersion = "1.0.0"
+	monitorVersion = "2.3.0"
 	sparkChars     = "▁▂▃▄▅▆▇█"
 	sparkLen       = 20
 )
@@ -68,6 +68,7 @@ type DestinationData struct {
 	Healthy        bool   `json:"healthy"`
 	PacketsSent    uint64 `json:"packets_sent"`
 	PacketsDropped uint64 `json:"packets_dropped"`
+	BytesSent      uint64 `json:"bytes_sent"`
 	LastError      string `json:"last_error"`
 }
 
@@ -102,17 +103,18 @@ func (rc *RateCalculator) Update(s StatsData, dests []DestinationData, now time.
 		return
 	}
 
-	rc.PpsIn = float64(s.PacketsReceived-rc.prev.PacketsReceived) / dt
-	rc.PpsOut = float64(s.PacketsForwarded-rc.prev.PacketsForwarded) / dt
-	rc.PpsDrop = float64(s.PacketsDropped-rc.prev.PacketsDropped) / dt
-	rc.PpsFilt = float64(s.PacketsFiltered-rc.prev.PacketsFiltered) / dt
-	rc.BpsIn = float64(s.BytesReceived-rc.prev.BytesReceived) / dt
-	rc.BpsOut = float64(s.BytesForwarded-rc.prev.BytesForwarded) / dt
+	// Guard against uint64 underflow on enricher restart (counters reset to 0)
+	rc.PpsIn = safeDelta(s.PacketsReceived, rc.prev.PacketsReceived) / dt
+	rc.PpsOut = safeDelta(s.PacketsForwarded, rc.prev.PacketsForwarded) / dt
+	rc.PpsDrop = safeDelta(s.PacketsDropped, rc.prev.PacketsDropped) / dt
+	rc.PpsFilt = safeDelta(s.PacketsFiltered, rc.prev.PacketsFiltered) / dt
+	rc.BpsIn = safeDelta(s.BytesReceived, rc.prev.BytesReceived) / dt
+	rc.BpsOut = safeDelta(s.BytesForwarded, rc.prev.BytesForwarded) / dt
 
 	rc.DestPps = make([]float64, len(dests))
 	for i, d := range dests {
 		if i < len(rc.prevDests) {
-			rc.DestPps[i] = float64(d.PacketsSent-rc.prevDests[i].PacketsSent) / dt
+			rc.DestPps[i] = safeDelta(d.PacketsSent, rc.prevDests[i].PacketsSent) / dt
 		}
 	}
 
@@ -499,7 +501,12 @@ func renderDashboard(status *StatusResponse, health string, rates *RateCalculato
 		filtPct := float64(status.Stats.PacketsFiltered) / float64(totalRecv) * 100
 
 		// Packets without Extended Gateway record (counter samples, no-match flows)
-		noGw := status.Stats.PacketsReceived - status.Stats.PacketsEnriched - status.Stats.PacketsDropped - status.Stats.PacketsFiltered
+		// Guard against uint64 underflow if counters are inconsistent after restart
+		var noGw uint64
+		sum := status.Stats.PacketsEnriched + status.Stats.PacketsDropped + status.Stats.PacketsFiltered
+		if status.Stats.PacketsReceived > sum {
+			noGw = status.Stats.PacketsReceived - sum
+		}
 		noGwPct := float64(noGw) / float64(totalRecv) * 100
 
 		barW := 40
@@ -538,9 +545,11 @@ func renderDashboard(status *StatusResponse, health string, rates *RateCalculato
 
 	// === ENRICHMENT RULES ===
 	if len(status.EnrichmentRules) > 0 {
-		lines = append(lines, dline{"ENRICHMENT RULES", cc("ENRICHMENT RULES", cBold+cCyan)})
+		rawTitle := "ENRICHMENT RULES — Extended Gateway (1003)"
+		colorTitle := cc("ENRICHMENT RULES", cBold+cCyan) + cc(" — Extended Gateway (1003)", cDim)
+		lines = append(lines, dline{rawTitle, colorTitle})
 
-		hdrR := fmt.Sprintf("%-16s %-20s %8s  %-s", "Name", "Network", "SetAS", "Modifies")
+		hdrR := fmt.Sprintf("%-16s %-18s %7s  %-s", "Name", "Network", "SetAS", "ExtGW Fields")
 		lines = append(lines, dline{hdrR, cc(hdrR, cBold+cWhite)})
 
 		tblSepR := strings.Repeat("─", rw(hdrR))
@@ -548,26 +557,26 @@ func renderDashboard(status *StatusResponse, health string, rates *RateCalculato
 
 		for _, r := range status.EnrichmentRules {
 			name := padR(truncStr(r.Name, 16), 16)
-			network := padR(r.Network, 20)
-			setAS := padL(fmt.Sprintf("%d", r.SetAS), 8)
+			network := padR(r.Network, 18)
+			setAS := padL(fmt.Sprintf("%d", r.SetAS), 7)
 
-			// Build human-readable modifies description
 			var cond string
 			if r.Overwrite {
 				cond = "always"
 			} else if r.MatchAS == 0 {
-				cond = "if unset"
+				cond = "if=0"
 			} else {
-				cond = fmt.Sprintf("if AS=%d", r.MatchAS)
+				cond = fmt.Sprintf("if=%d", r.MatchAS)
 			}
-			modifies := "SrcAS + SrcPeerAS + DstAS + RouterAS (" + cond + ")"
 
-			rawRow := name + " " + network + " " + setAS + "  " + modifies
+			fields := "Out:SrcAS,SrcPeerAS,RouterAS In:DstAS,RouterAS (" + cond + ")"
+
+			rawRow := name + " " + network + " " + setAS + "  " + fields
 			colorRow := cc(name, cWhite) + " " + cc(network, cCyan) + " " +
 				cc(setAS, cYellow) + "  " +
-				cc("SrcAS", cGreen) + " + " + cc("SrcPeerAS", cGreen) + " + " +
-				cc("DstAS", cGreen) + " + " + cc("RouterAS", cGreen) +
-				" (" + cc(cond, cDim) + ")"
+				cc("Out:", cWhite) + cc("SrcAS", cGreen) + "," + cc("SrcPeerAS", cGreen) + "," + cc("RouterAS", cGreen) +
+				" " + cc("In:", cWhite) + cc("DstAS", cGreen) + "," + cc("RouterAS", cGreen) +
+				" " + cc("("+cond+")", cDim)
 			lines = append(lines, dline{rawRow, colorRow})
 		}
 
@@ -579,13 +588,22 @@ func renderDashboard(status *StatusResponse, health string, rates *RateCalculato
 		lines = append(lines, dline{"FLOW DIAGRAM", cc("FLOW DIAGRAM", cBold+cCyan)})
 
 		totalRecv := maxU64(status.Stats.PacketsReceived, 1)
-		enrichPct := float64(status.Stats.PacketsEnriched) / float64(totalRecv) * 100
+		enrichPct := fmt.Sprintf("%.1f%%", float64(status.Stats.PacketsEnriched)/float64(totalRecv)*100)
 		inRate := padL(formatPps(rates.PpsIn), 9)
 
 		srcLabel := "SOURCE"
 		if len(status.WhitelistSources) > 0 {
 			srcLabel = status.WhitelistSources[0]
 		}
+
+		// Line 1: [SOURCE] ─ rate ─▶ [ENRICHER] pct%
+		prefix := "[" + srcLabel + "] ─" + inRate + "─▶ "
+		rawMain := prefix + "[ENRICHER] " + enrichPct
+		colorMain := "[" + cc(srcLabel, cCyan) + "] ─" + cc(inRate, cWhite) + "─▶ [" +
+			cc("ENRICHER", cBold+cGreen) + "] " + cc(enrichPct, cYellow)
+		lines = append(lines, dline{rawMain, colorMain})
+
+		indent := strings.Repeat(" ", rw(prefix))
 
 		if len(status.Destinations) > 0 {
 			for i, d := range status.Destinations {
@@ -594,7 +612,7 @@ func renderDashboard(status *StatusResponse, health string, rates *RateCalculato
 					dPps = formatPps(rates.DestPps[i])
 				}
 				dPpsFmt := padL(dPps, 9)
-				dName := d.Name
+				dName := padR(d.Name, 12)
 				dAddr := d.Address
 
 				healthR := "● UP"
@@ -604,27 +622,19 @@ func renderDashboard(status *StatusResponse, health string, rates *RateCalculato
 					healthC = cc("● DN", cRed)
 				}
 
-				if i == 0 {
-					rawLine := "[" + srcLabel + "]─" + inRate + "─▶[ENRICHER]─" + dPpsFmt + "─▶[" + dName + "] " + healthR + "  " + dAddr
-					colorLine := "[" + cc(srcLabel, cCyan) + "]─" + cc(inRate, cWhite) + "─▶[" +
-						cc("ENRICHER", cBold+cGreen) + "]─" + cc(dPpsFmt, cWhite) + "─▶[" +
-						cc(dName, cWhite) + "] " + healthC + "  " + cc(dAddr, cDim)
-					lines = append(lines, dline{rawLine, colorLine})
-				} else {
-					enrichFmt := fmt.Sprintf("%5.1f%%", enrichPct)
-					// Indent to align with the ENRICHER box output
-					indent := strings.Repeat(" ", rw("["+srcLabel+"]─"+inRate+"─▶[ENRICHER]─"))
-					rawLine := indent + enrichFmt + "─" + dPpsFmt + "─▶[" + dName + "] " + healthR + "  " + dAddr
-					colorLine := indent + cc(enrichFmt, cYellow) + "─" + cc(dPpsFmt, cWhite) + "─▶[" +
-						cc(dName, cWhite) + "] " + healthC + "  " + cc(dAddr, cDim)
-					lines = append(lines, dline{rawLine, colorLine})
-					enrichPct = 0
+				tree := "├─"
+				if i == len(status.Destinations)-1 {
+					tree = "└─"
 				}
+
+				rawLine := indent + tree + dPpsFmt + " ─▶ " + dName + " " + healthR + "  " + dAddr
+				colorLine := indent + cc(tree, cDim) + cc(dPpsFmt, cWhite) + " ─▶ " +
+					cc(dName, cWhite) + " " + healthC + "  " + cc(dAddr, cDim)
+				lines = append(lines, dline{rawLine, colorLine})
 			}
 		} else {
-			rawLine := "[" + srcLabel + "]─" + inRate + "─▶[ENRICHER]─▶(no destinations)"
-			colorLine := "[" + cc(srcLabel, cCyan) + "]─" + cc(inRate, cWhite) + "─▶[" +
-				cc("ENRICHER", cBold+cGreen) + "]─▶" + cc("(no destinations)", cYellow)
+			rawLine := indent + "└─▶ (no destinations)"
+			colorLine := indent + cc("└─▶ ", cDim) + cc("(no destinations)", cYellow)
 			lines = append(lines, dline{rawLine, colorLine})
 		}
 	}
@@ -675,9 +685,11 @@ func renderDashboard(status *StatusResponse, health string, rates *RateCalculato
 		bi := formatBytes(s.BytesReceived)
 		bo := formatBytes(s.BytesForwarded)
 		dr := formatCount(s.PacketsDropped)
+		fl := formatCount(s.PacketsFiltered)
 
 		rawTot1 := fmt.Sprintf("Received: %12s   Forwarded: %12s   Enriched: %12s", r, f, e)
 		rawTot2 := fmt.Sprintf("Bytes In: %12s   Bytes Out: %12s   Dropped:  %12s", bi, bo, dr)
+		rawTot3 := fmt.Sprintf("Filtered: %12s", fl)
 
 		lines = append(lines, dline{rawTot1, cc(rawTot1, cWhite)})
 
@@ -686,6 +698,10 @@ func renderDashboard(status *StatusResponse, health string, rates *RateCalculato
 			dropColor = cYellow
 		}
 		lines = append(lines, dline{rawTot2, cc(rawTot2, dropColor)})
+
+		if s.PacketsFiltered > 0 {
+			lines = append(lines, dline{rawTot3, cc(rawTot3, cCyan)})
+		}
 	}
 
 	return emit(lines)
@@ -724,6 +740,15 @@ func maxU64(a, b uint64) uint64 {
 		return a
 	}
 	return b
+}
+
+// safeDelta returns float64(a - b) if a >= b, else 0. Prevents uint64 underflow
+// when the enricher restarts and counters reset to 0 between polls.
+func safeDelta(a, b uint64) float64 {
+	if a >= b {
+		return float64(a - b)
+	}
+	return 0
 }
 
 func disableColors() {

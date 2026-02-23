@@ -5,7 +5,7 @@ Configuration file location: `/etc/sflow-enricher/config.yaml`
 ## Full Example
 
 ```yaml
-# sFlow Enricher Configuration v2.1
+# sFlow Enricher Configuration v2.3
 
 # Listen address for incoming sFlow
 listen:
@@ -42,13 +42,13 @@ destinations:
 # ASN enrichment rules
 enrichment:
   rules:
-    - name: "my-network-ipv4"
+    - name: "MY_NET_IPv4"
       network: "203.0.113.0/24"
       match_as: 0
       set_as: 64512
       overwrite: false
 
-    - name: "my-network-ipv6"
+    - name: "MY_NET_IPv6"
       network: "2001:db8::/32"
       match_as: 0
       set_as: 64512
@@ -167,10 +167,10 @@ destinations:
 
 ### enrichment
 
-Rules for modifying ASN fields in sFlow packets. Rules are applied to **both SrcAS and DstAS**:
+Rules for modifying ASN fields in sFlow Extended Gateway records (type 1003). Each rule enriches up to 4 fields:
 
-- **SrcAS enrichment**: Applied when source IP matches the network (outbound traffic)
-- **DstAS enrichment**: Applied when destination IP matches the network AND DstASPath is empty (inbound traffic)
+- **Outbound** (source IP matches network): SrcAS, SrcPeerAS, RouterAS (in-place modification)
+- **Inbound** (destination IP matches network): DstAS (XDR insert +12 bytes), RouterAS (in-place)
 
 #### enrichment.rules
 
@@ -178,39 +178,36 @@ Rules for modifying ASN fields in sFlow packets. Rules are applied to **both Src
 |-----------|------|---------|-------------|
 | `name` | string | required | Rule name (for logging) |
 | `network` | string | required | CIDR notation (e.g., `"192.168.0.0/16"`) |
-| `match_as` | uint32 | required | Only apply SrcAS if current value equals this |
-| `set_as` | uint32 | required | New AS value to set |
+| `match_as` | uint32 | required | Only apply if current AS value equals this (for SrcAS) |
+| `set_as` | uint32 | required | New AS value to set (applied to SrcAS, SrcPeerAS, RouterAS, DstAS) |
 | `overwrite` | bool | `false` | If true, ignore `match_as` and always overwrite SrcAS |
 
 ```yaml
 enrichment:
   rules:
-    - name: "my-network-ipv4"
+    - name: "MY_NET_IPv4"
       network: "192.168.0.0/16"
       match_as: 0           # Only if SrcAS is 0
       set_as: 64512         # Set to AS64512
       overwrite: false      # Don't overwrite if already set
 
-    - name: "force-as"
+    - name: "FORCE_AS"
       network: "10.0.0.0/8"
       match_as: 0           # Ignored when overwrite=true
       set_as: 64513
       overwrite: true       # Always set, regardless of current value
 ```
 
-**How SrcAS enrichment works (outbound traffic):**
-1. Extract source IP from raw packet header
-2. Check if source IP matches any rule's network
-3. If `overwrite: false`, only modify if current SrcAS equals `match_as`
-4. If `overwrite: true`, always modify regardless of current SrcAS
-5. Modify the SrcAS field in-place (no packet resize)
+**Outbound enrichment (source IP matches rule network):**
+1. **SrcAS**: If `overwrite: false`, only modify when SrcAS equals `match_as`. If `overwrite: true`, always overwrite. In-place 4-byte modification.
+2. **SrcPeerAS**: Set to `set_as` when SrcPeerAS=0 (locally-originated traffic). In-place.
+3. **RouterAS**: Set to `set_as` when RouterAS=0. In-place.
 
-**How DstAS enrichment works (inbound traffic):**
-1. Extract destination IP from raw packet header
-2. Check if destination IP matches any rule's network
-3. Check if DstASPath is empty (length = 0)
-4. Insert AS path segment with `set_as` value (packet resize +12 bytes)
-5. Update record and sample length fields (XDR-compliant)
+**Inbound enrichment (destination IP matches rule network):**
+1. **DstAS**: Insert AS path segment when DstASPathLen=0. Packet resize +12 bytes (XDR-compliant).
+2. **RouterAS**: Set to `set_as` when RouterAS=0. In-place.
+
+**All fields are within the Extended Gateway record (type 1003).**
 
 **Multi-sample handling:**
 - Samples are processed in **reverse order** (last to first)

@@ -126,58 +126,75 @@ telegram:
 **Trigger**: Service started and ready
 
 **Information included**:
-- Listen address
-- Version
-- Enrichment rules list
-- Destinations list
+- Listen address (host:port)
+- Enrichment rules with Extended Gateway (1003) details:
+  - Rule name, SetAS, network CIDR per rule
+  - Outbound fields: SrcAS, SrcPeerAS, RouterAS (in-place, when field=0)
+  - Inbound fields: DstAS (XDR insert), RouterAS (in-place, when field=0)
+- Destinations list with addresses
+- sFlow source IPs (authorized routers)
 
 ### 2. shutdown
 **Trigger**: Service shutting down (SIGTERM/SIGINT)
 
 **Information included**:
-- Total uptime
-- Packets received
-- Packets enriched
-- Packets dropped
-- Final destination status
+- Total uptime (human-readable)
+- Stats section:
+  - Packets received
+  - Packets enriched with percentage
+  - Packets forwarded
+  - Packets dropped
+- Destinations with per-destination packets sent and bytes (human-readable)
 
 ### 3. destination_down
 **Trigger**: Health check failed for a destination
 
 **Information included**:
-- Destination name
-- Specific error
-- Healthy/total destinations count
+- Destination name and address
+- DOWN status
+- Specific error message
+- Packets sent before failure
 
 ### 4. destination_up
 **Trigger**: Destination became healthy after being down
 
 **Information included**:
-- Destination name
-- Healthy/total destinations count
+- Destination name and address
+- UP status
+- Recovered indicator
 
 ### 5. high_drop_rate
 **Trigger**: Drop rate exceeds `drop_rate_threshold` (default 5.0%)
 
 **Information included**:
-- Current drop rate percentage
-- Dropped packets in the interval
-- Total packets received in the interval
+- Current drop rate vs threshold percentage
+- Interval stats (received and dropped in last interval)
+- Cumulative totals (received and dropped since start)
 
 The drop rate is calculated from deltas between stats intervals, not cumulative totals. This ensures alerts fire on current conditions, not historical data.
+
+### 6. ipv6_degraded
+**Trigger**: IPv6 connection to Telegram API failed, fallback to IPv4 (max 1 alert per hour)
+
+**Information included**:
+- IPv6 failure description
+- Sent via separate IPv4-only HTTP client (avoids recursion through fallback dialer)
 
 ---
 
 ## Message Format
 
-### Standard Structure
+### Standard Template (wrapper)
+
+All messages share a common header/footer template with version and uniform section spacing:
 
 ```
-{ICON} *sFlow ASN Enricher*
-━━━━━━━━━━━━━━━━━━━━━
+{ICON} *sFlow ASN Enricher* `v2.3.0`
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📍 *Host:* `hostname`
 🏷️ *Event:* `event_type`
-💬 *Details:* {specific message}
+{type-specific body with sections separated by empty lines}
+
 🕐 *Time:* `DD/MM/YYYY HH:MM:SS`
 ```
 
@@ -190,55 +207,115 @@ The drop rate is calculated from deltas between stats intervals, not cumulative 
 | destination_down | 🔻 | Destination down |
 | destination_up | 🔺 | Destination up |
 | high_drop_rate | 📉 | High drop rate |
+| ipv6_degraded | ⚠️ | IPv6 fallback to IPv4 |
 | default | ℹ️ | Generic information |
 
 ### Example: Startup
 
 ```
-🟢 *sFlow ASN Enricher*
-━━━━━━━━━━━━━━━━━━━━━
+🟢 *sFlow ASN Enricher* `v2.3.0`
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📍 *Host:* `myserver.example.com`
 🏷️ *Event:* `startup`
-💬 *Details:* Service started on `0.0.0.0:6343`
-📦 Version: `2.0.0`
-📋 Rules:
-   • `my-network-ipv4` → AS64512
-   • `my-network-ipv6` → AS64512
-🎯 Destinations:
+📡 *Listen:* `0.0.0.0:6343`
+
+📋 *Enrichment Rules — Extended Gateway (1003):*
+   • `MY_NET_IPv4` → AS64512 (203.0.113.0/24)
+   • `MY_NET_IPv6` → AS64512 (2001:db8::/32)
+   _Out(srcIP): SrcAS, SrcPeerAS, RouterAS_
+   _In(dstIP): DstAS, RouterAS_
+
+🎯 *Destinations:*
    • `primary-collector` (198.51.100.1:6343)
    • `secondary-collector` (198.51.100.2:6343)
-🕐 *Time:* `23/01/2026 20:06:02`
+
+🖧 *sFlow Sources:*
+   • `10.0.0.1`
+
+🕐 *Time:* `23/02/2026 23:30:48`
 ```
 
 ### Example: Shutdown
 
 ```
-🔴 *sFlow ASN Enricher*
-━━━━━━━━━━━━━━━━━━━━━
+🔴 *sFlow ASN Enricher* `v2.3.0`
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📍 *Host:* `myserver.example.com`
 🏷️ *Event:* `shutdown`
-💬 *Details:* Service shutting down
-⏱️ Uptime: `2h15m30s`
-📥 Received: `15234`
-✅ Enriched: `14890`
-❌ Dropped: `12`
-🎯 Destinations:
-   ✅ `primary-collector`: 15234 pkts
-   ✅ `secondary-collector`: 15234 pkts
-🕐 *Time:* `23/01/2026 22:21:32`
+⏱️ *Uptime:* `2h15m30s`
+
+📊 *Stats:*
+   📥 Received: `15234`
+   ✅ Enriched: `14890` (97.7%)
+   📤 Forwarded: `30468`
+   ❌ Dropped: `0`
+
+🎯 *Destinations:*
+   ✅ `primary-collector`: 15234 pkts, 5.2 MB
+   ✅ `secondary-collector`: 15234 pkts, 5.2 MB
+
+🕐 *Time:* `23/02/2026 23:30:48`
 ```
 
 ### Example: Destination Down
 
 ```
-🔻 *sFlow ASN Enricher*
-━━━━━━━━━━━━━━━━━━━━━
+🔻 *sFlow ASN Enricher* `v2.3.0`
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📍 *Host:* `myserver.example.com`
 🏷️ *Event:* `destination_down`
-💬 *Details:* Destination `primary-collector` is *DOWN*
-🔥 Error: `dial udp: connection refused`
-📊 Status: `1/2` destinations healthy
-🕐 *Time:* `23/01/2026 20:15:00`
+🎯 *Destination:* `primary-collector` (`198.51.100.1:6343`)
+❌ *Status:* DOWN
+
+💥 *Error:* `dial udp: connection refused`
+
+📊 *Sent before failure:* 15234 pkts
+
+🕐 *Time:* `23/02/2026 20:15:00`
+```
+
+### Example: Destination Up
+
+```
+🔺 *sFlow ASN Enricher* `v2.3.0`
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📍 *Host:* `myserver.example.com`
+🏷️ *Event:* `destination_up`
+🎯 *Destination:* `primary-collector` (`198.51.100.1:6343`)
+✅ *Status:* UP
+
+🔄 Recovered
+
+🕐 *Time:* `23/02/2026 20:20:00`
+```
+
+### Example: High Drop Rate
+
+```
+📉 *sFlow ASN Enricher* `v2.3.0`
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📍 *Host:* `myserver.example.com`
+🏷️ *Event:* `high_drop_rate`
+⚠️ *Drop rate:* `7.2%` (threshold: `5.0%`)
+
+📊 *Interval:* `1000` received, `72` dropped
+
+📈 *Totals:* `50000` received, `150` dropped
+
+🕐 *Time:* `23/02/2026 20:30:00`
+```
+
+### Example: IPv6 Degraded
+
+```
+⚠️ *sFlow ASN Enricher* `v2.3.0`
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📍 *Host:* `myserver.example.com`
+🏷️ *Event:* `ipv6_degraded`
+
+💬 IPv6 connectivity to Telegram API failed, using IPv4 fallback
+
+🕐 *Time:* `23/02/2026 20:35:00`
 ```
 
 ---
@@ -305,49 +382,25 @@ func sendTelegramAlertWithWait(alertType, message string, blocking bool) {
         case "high_drop_rate":  icon = "📉"
         }
 
+        // Template includes version in title and spacing before Time
         fullMessage := fmt.Sprintf(
-            "%s *sFlow ASN Enricher*\n"+
-                "━━━━━━━━━━━━━━━━━━━━━\n"+
+            "%s *sFlow ASN Enricher* `v%s`\n"+
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"+
                 "📍 *Host:* `%s`\n"+
                 "🏷️ *Event:* `%s`\n"+
-                "💬 *Details:* %s\n"+
-                "🕐 *Time:* `%s`",
-            icon, hostname, alertType, message,
+                "%s\n"+
+                "\n🕐 *Time:* `%s`",
+            icon, version, hostname, alertType, message,
             time.Now().Format("02/01/2006 15:04:05"))
 
-        apiURL := fmt.Sprintf(
-            "https://api.telegram.org/bot%s/sendMessage",
-            cfg.Telegram.BotToken)
-
-        payload := map[string]interface{}{
-            "chat_id": cfg.Telegram.ChatID,
-            "text": fullMessage, "parse_mode": "Markdown",
-        }
-        jsonPayload, err := json.Marshal(payload)
-        if err != nil {
-            logError("Failed to marshal Telegram payload", err, nil)
-            return
-        }
-
-        ctx, cancel := context.WithTimeout(context.Background(),
-            time.Duration(cfg.Telegram.HTTPTimeout)*time.Second)
-        defer cancel()
-
-        req, _ := http.NewRequestWithContext(ctx, "POST", apiURL,
-            bytes.NewBuffer(jsonPayload))
-        req.Header.Set("Content-Type", "application/json")
-
-        resp, err := telegramClient.Do(req)
-        if err != nil {
-            logError("Failed to send Telegram alert", err, nil)
-            return
-        }
-        defer resp.Body.Close()
+        // ... HTTP POST to Telegram API ...
     }
 
     if blocking { doSend() } else { go doSend() }
 }
 ```
+
+Each alert type builds its own structured `message` body with sections separated by `\n` (empty lines) for visual spacing. The template wraps the body with the common header (icon, version, host, event) and footer (time).
 
 ### Rate-Limited Alerts
 
@@ -388,9 +441,13 @@ func checkDropRate() {
     if deltaReceived > 0 {
         dropRate := float64(deltaDropped) / float64(deltaReceived) * 100
         if dropRate >= cfg.Telegram.DropRateThreshold {
-            sendTelegramAlert("high_drop_rate", fmt.Sprintf(
-                "Drop rate: %.1f%%\nDropped: %d / Received: %d (last interval)",
-                dropRate, deltaDropped, deltaReceived))
+            msg := fmt.Sprintf("⚠️ *Drop rate:* `%.1f%%` (threshold: `%.1f%%`)\n"+
+                "\n📊 *Interval:* `%d` received, `%d` dropped\n"+
+                "\n📈 *Totals:* `%d` received, `%d` dropped",
+                dropRate, cfg.Telegram.DropRateThreshold,
+                deltaReceived, deltaDropped,
+                curReceived, curDropped)
+            sendRateLimitedAlert("high_drop_rate", "global", msg)
         }
     }
 }
@@ -491,19 +548,24 @@ case syscall.SIGINT, syscall.SIGTERM:
         "signal": sig.String(),
     })
 
+    // Build structured shutdown message with sections
+    shutdownMsg := fmt.Sprintf("⏱️ *Uptime:* `%s`", uptime)
+    shutdownMsg += "\n"
+    shutdownMsg += "\n📊 *Stats:*"
+    shutdownMsg += fmt.Sprintf("\n   📥 Received: `%d`", recv)
+    shutdownMsg += fmt.Sprintf("\n   ✅ Enriched: `%d` (%.1f%%)", enriched, enrichPct)
+    shutdownMsg += fmt.Sprintf("\n   📤 Forwarded: `%d`", forwarded)
+    shutdownMsg += fmt.Sprintf("\n   ❌ Dropped: `%d`", dropped)
+    shutdownMsg += "\n"
+    shutdownMsg += "\n🎯 *Destinations:*"
+    for _, dest := range destinations {
+        shutdownMsg += fmt.Sprintf("\n   %s `%s`: %d pkts, %s",
+            statusIcon, dest.Config.Name,
+            dest.Stats.PacketsSent, formatBytesCompact(dest.Stats.BytesSent))
+    }
+
     // Send notification and WAIT for completion (blocking=true)
-    sendTelegramAlertWithWait("shutdown", fmt.Sprintf(
-        "Service shutting down\n"+
-            "⏱️ Uptime: `%s`\n"+
-            "📥 Received: `%d`\n"+
-            "✅ Enriched: `%d`\n"+
-            "❌ Dropped: `%d`\n"+
-            "🎯 Destinations:%s",
-        time.Since(stats.StartTime).Round(time.Second),
-        atomic.LoadUint64(&stats.PacketsReceived),
-        atomic.LoadUint64(&stats.PacketsEnriched),
-        atomic.LoadUint64(&stats.PacketsDropped),
-        destStats), true)  // <-- blocking=true
+    sendTelegramAlertWithWait("shutdown", shutdownMsg, true)
 
     // Only NOW close everything
     close(stopChan)
@@ -580,6 +642,6 @@ curl -X POST "https://api.telegram.org/bot{YOUR_TOKEN}/sendMessage" \
 
 **Paolo Caparrelli** - GOLINE SA
 **Email**: soc@goline.ch
-**Date**: 21/02/2026
+**Date**: 23/02/2026
 
 **Co-Authored-By**: Claude Opus 4.6 (Anthropic)

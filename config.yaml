@@ -36,13 +36,13 @@ destinations:
 # If src_ip matches network and src_as equals 'match_as', replace with 'set_as'
 enrichment:
   rules:
-    - name: "my-network-ipv4"
+    - name: "MY_NET_IPv4"
       network: "203.0.113.0/24"
       match_as: 0          # Only enrich if current AS is 0
       set_as: 64512
       overwrite: false     # Don't overwrite if AS already set
 
-    - name: "my-network-ipv6"
+    - name: "MY_NET_IPv6"
       network: "2001:db8::/32"
       match_as: 0
       set_as: 64512

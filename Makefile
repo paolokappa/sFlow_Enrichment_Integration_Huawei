@@ -2,7 +2,7 @@
 
 BINARY=sflow-enricher
 MONITOR=sflow-monitor
-VERSION=2.1.0
+VERSION=2.3.0
 BUILD_DIR=build
 CONFIG_DIR=/etc/sflow-enricher
 INSTALL_DIR=/usr/local/bin

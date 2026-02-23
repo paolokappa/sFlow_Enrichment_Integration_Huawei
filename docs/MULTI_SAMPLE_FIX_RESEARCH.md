@@ -424,19 +424,19 @@ for i := len(datagram.Samples) - 1; i >= 0; i-- {
 **SrcAS Enrichment** (outbound traffic):
 ```
 [DEBUG] Gateway AS values map[src_as:0 src_ip:203.0.113.30 ...]
-[DEBUG] Enriching SrcAS map[new_as:64512 old_as:0 rule:my-network-ipv4 src_ip:203.0.113.30]
+[DEBUG] Enriching SrcAS map[new_as:64512 old_as:0 rule:MY_NET_IPv4 src_ip:203.0.113.30]
 ```
 
 **DstAS Enrichment** (inbound traffic):
 ```
 [DEBUG] Gateway AS values map[dst_as:0 dst_as_path:[] dst_ip:203.0.113.24 ...]
-[DEBUG] Enriching DstAS map[dst_ip:203.0.113.24 new_as:64512 rule:my-network-ipv4]
+[DEBUG] Enriching DstAS map[dst_ip:203.0.113.24 new_as:64512 rule:MY_NET_IPv4]
 ```
 
 **IPv6 Support**:
 ```
-[DEBUG] Enriching SrcAS map[new_as:64512 old_as:0 rule:my-network-ipv6 src_ip:2001:db8::15]
-[DEBUG] Enriching DstAS map[dst_ip:2001:db8::22 new_as:64512 rule:my-network-ipv6]
+[DEBUG] Enriching SrcAS map[new_as:64512 old_as:0 rule:MY_NET_IPv6 src_ip:2001:db8::15]
+[DEBUG] Enriching DstAS map[dst_ip:2001:db8::22 new_as:64512 rule:MY_NET_IPv6]
 ```
 
 ### Success Metrics

@@ -10,9 +10,10 @@ const (
 	// sFlow v5 constants
 	SFlowVersion5 = 5
 
-	// Address types
-	AddressTypeIPv4 = 1
-	AddressTypeIPv6 = 2
+	// Address types (sFlow v5: enum address_type)
+	AddressTypeUnknown = 0 // RFC: void (no address bytes follow)
+	AddressTypeIPv4    = 1
+	AddressTypeIPv6    = 2
 
 	// Sample types (enterprise 0)
 	SampleTypeFlowSample         = 1
@@ -262,9 +263,11 @@ func ParseFlowSample(data []byte, expanded bool) (*FlowSample, error) {
 }
 
 // ParseExtendedGateway parses extended gateway record
+// Supports all RFC address_type values: UNKNOWN(0)=void, IP_V4(1)=4 bytes, IP_V6(2)=16 bytes
 func ParseExtendedGateway(data []byte) (*ExtendedGateway, error) {
-	if len(data) < 20 {
-		return nil, fmt.Errorf("extended gateway data too short")
+	// Minimum: type(4) + void(0) + AS(4) + SrcAS(4) + SrcPeerAS(4) = 16 bytes (UNKNOWN nexthop)
+	if len(data) < 16 {
+		return nil, fmt.Errorf("extended gateway data too short: %d bytes", len(data))
 	}
 
 	eg := &ExtendedGateway{}
@@ -274,10 +277,19 @@ func ParseExtendedGateway(data []byte) (*ExtendedGateway, error) {
 	offset += 4
 
 	switch eg.NextHopType {
+	case AddressTypeUnknown:
+		// RFC: union address case UNKNOWN: void — no address bytes follow
+		eg.NextHop = nil
 	case AddressTypeIPv4:
+		if offset+4 > len(data) {
+			return nil, fmt.Errorf("extended gateway data too short for IPv4 nexthop")
+		}
 		eg.NextHop = net.IP(data[offset : offset+4])
 		offset += 4
 	case AddressTypeIPv6:
+		if offset+16 > len(data) {
+			return nil, fmt.Errorf("extended gateway data too short for IPv6 nexthop")
+		}
 		eg.NextHop = net.IP(data[offset : offset+16])
 		offset += 16
 	default:
@@ -452,6 +464,22 @@ func GetSrcIPFromRawPacket(data []byte) net.IP {
 	return nil
 }
 
+// nextHopAddrSize returns the address size in bytes for a given nexthop address_type.
+// RFC sFlow v5: UNKNOWN(0)=void(0 bytes), IP_V4(1)=4 bytes, IP_V6(2)=16 bytes.
+// Returns -1 for unsupported types.
+func nextHopAddrSize(nextHopType uint32) int {
+	switch nextHopType {
+	case AddressTypeUnknown:
+		return 0 // RFC: void — no address bytes
+	case AddressTypeIPv4:
+		return 4
+	case AddressTypeIPv6:
+		return 16
+	default:
+		return -1
+	}
+}
+
 // ModifyDstAS inserts destination AS into an empty DstASPath
 // Returns the modified packet (may be resized) and success flag
 func ModifyDstAS(packet []byte, sampleOffset int, recordOffset int, newAS uint32) ([]byte, bool) {
@@ -485,15 +513,12 @@ func ModifyDstAS(packet []byte, sampleOffset int, recordOffset int, newAS uint32
 	}
 	nextHopType := binary.BigEndian.Uint32(packet[recordDataStart:])
 
-	var dstASPathLenOffset int
-	switch nextHopType {
-	case AddressTypeIPv4:
-		dstASPathLenOffset = recordDataStart + 4 + 4 + 4 + 4 + 4 // type + ipv4 + AS + SrcAS + SrcPeerAS
-	case AddressTypeIPv6:
-		dstASPathLenOffset = recordDataStart + 4 + 16 + 4 + 4 + 4 // type + ipv6 + AS + SrcAS + SrcPeerAS
-	default:
+	addrSize := nextHopAddrSize(nextHopType)
+	if addrSize < 0 {
 		return packet, false
 	}
+	// DstASPathLen offset: type(4) + addr(addrSize) + AS(4) + SrcAS(4) + SrcPeerAS(4)
+	dstASPathLenOffset := recordDataStart + 4 + addrSize + 4 + 4 + 4
 
 	if dstASPathLenOffset+4 > len(packet) {
 		return packet, false
@@ -538,7 +563,7 @@ func ModifyDstAS(packet []byte, sampleOffset int, recordOffset int, newAS uint32
 func ModifySrcAS(packet []byte, sampleOffset int, recordOffset int, newAS uint32) {
 	// Calculate absolute offset to SrcAS field in extended gateway
 	// Record header: 8 bytes (enterprise/format + length)
-	// Extended gateway: NextHopType (4) + NextHop (4 or 16) + AS (4) + SrcAS (4)
+	// Extended gateway: NextHopType (4) + NextHop (0|4|16) + AS (4) + SrcAS (4)
 
 	// First, read the sample data to find the record
 	if sampleOffset+8 > len(packet) {
@@ -572,15 +597,12 @@ func ModifySrcAS(packet []byte, sampleOffset int, recordOffset int, newAS uint32
 	}
 	nextHopType := binary.BigEndian.Uint32(packet[recordDataStart:])
 
-	var srcASOffset int
-	switch nextHopType {
-	case AddressTypeIPv4:
-		srcASOffset = recordDataStart + 4 + 4 + 4 // type + ipv4 + AS
-	case AddressTypeIPv6:
-		srcASOffset = recordDataStart + 4 + 16 + 4 // type + ipv6 + AS
-	default:
+	addrSize := nextHopAddrSize(nextHopType)
+	if addrSize < 0 {
 		return
 	}
+	// SrcAS offset: type(4) + addr(addrSize) + AS(4)
+	srcASOffset := recordDataStart + 4 + addrSize + 4
 
 	if srcASOffset+4 > len(packet) {
 		return
@@ -592,8 +614,8 @@ func ModifySrcAS(packet []byte, sampleOffset int, recordOffset int, newAS uint32
 
 // ModifyRouterAS modifies the router's own AS field (the "as" field in extended gateway).
 // This field should always contain the AS of the exporting router.
-// Layout: NextHopType(4) + NextHop(4|16) + AS(4) + SrcAS(4) + SrcPeerAS(4)
-//                                           ^--- this field
+// Layout: NextHopType(4) + NextHop(0|4|16) + AS(4) + SrcAS(4) + SrcPeerAS(4)
+//                                              ^--- this field
 func ModifyRouterAS(packet []byte, sampleOffset int, recordOffset int, newAS uint32) {
 	if sampleOffset+8 > len(packet) {
 		return
@@ -623,15 +645,12 @@ func ModifyRouterAS(packet []byte, sampleOffset int, recordOffset int, newAS uin
 	}
 	nextHopType := binary.BigEndian.Uint32(packet[recordDataStart:])
 
-	var routerASOffset int
-	switch nextHopType {
-	case AddressTypeIPv4:
-		routerASOffset = recordDataStart + 4 + 4 // type + ipv4
-	case AddressTypeIPv6:
-		routerASOffset = recordDataStart + 4 + 16 // type + ipv6
-	default:
+	addrSize := nextHopAddrSize(nextHopType)
+	if addrSize < 0 {
 		return
 	}
+	// RouterAS offset: type(4) + addr(addrSize)
+	routerASOffset := recordDataStart + 4 + addrSize
 
 	if routerASOffset+4 > len(packet) {
 		return
@@ -642,8 +661,8 @@ func ModifyRouterAS(packet []byte, sampleOffset int, recordOffset int, newAS uin
 
 // ModifySrcPeerAS modifies the source peer AS field in extended gateway.
 // For locally-originated traffic, SrcPeerAS should equal the router's own AS.
-// Layout: NextHopType(4) + NextHop(4|16) + AS(4) + SrcAS(4) + SrcPeerAS(4)
-//                                                               ^--- this field
+// Layout: NextHopType(4) + NextHop(0|4|16) + AS(4) + SrcAS(4) + SrcPeerAS(4)
+//                                                                  ^--- this field
 func ModifySrcPeerAS(packet []byte, sampleOffset int, recordOffset int, newAS uint32) {
 	if sampleOffset+8 > len(packet) {
 		return
@@ -673,15 +692,12 @@ func ModifySrcPeerAS(packet []byte, sampleOffset int, recordOffset int, newAS ui
 	}
 	nextHopType := binary.BigEndian.Uint32(packet[recordDataStart:])
 
-	var srcPeerASOffset int
-	switch nextHopType {
-	case AddressTypeIPv4:
-		srcPeerASOffset = recordDataStart + 4 + 4 + 4 + 4 // type + ipv4 + AS + SrcAS
-	case AddressTypeIPv6:
-		srcPeerASOffset = recordDataStart + 4 + 16 + 4 + 4 // type + ipv6 + AS + SrcAS
-	default:
+	addrSize := nextHopAddrSize(nextHopType)
+	if addrSize < 0 {
 		return
 	}
+	// SrcPeerAS offset: type(4) + addr(addrSize) + AS(4) + SrcAS(4)
+	srcPeerASOffset := recordDataStart + 4 + addrSize + 4 + 4
 
 	if srcPeerASOffset+4 > len(packet) {
 		return

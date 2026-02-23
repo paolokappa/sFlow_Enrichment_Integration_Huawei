@@ -53,20 +53,20 @@ $ curl -s http://127.0.0.1:8080/status | jq .
 
 ```json
 {
-  "version": "2.2.2",
+  "version": "2.3.0",
   "uptime": "2h30m15s",
   "listen_address": "0.0.0.0:6343",
   "whitelist_sources": ["10.0.0.1"],
   "enrichment_rules": [
     {
-      "name": "my-network-ipv4",
+      "name": "MY_NET_IPv4",
       "network": "203.0.113.0/24",
       "match_as": 0,
       "set_as": 64512,
       "overwrite": false
     },
     {
-      "name": "my-network-ipv6",
+      "name": "MY_NET_IPv6",
       "network": "2001:db8::/32",
       "match_as": 0,
       "set_as": 64512,
@@ -89,6 +89,7 @@ $ curl -s http://127.0.0.1:8080/status | jq .
       "healthy": true,
       "packets_sent": 125000,
       "packets_dropped": 0,
+      "bytes_sent": 45000000,
       "last_error": ""
     },
     {
@@ -97,6 +98,7 @@ $ curl -s http://127.0.0.1:8080/status | jq .
       "healthy": true,
       "packets_sent": 125000,
       "packets_dropped": 0,
+      "bytes_sent": 45000000,
       "last_error": ""
     }
   ]
@@ -129,6 +131,7 @@ $ curl -s http://127.0.0.1:8080/status | jq .
 | `destinations[].healthy` | bool | Health check status |
 | `destinations[].packets_sent` | uint64 | Packets sent to this destination |
 | `destinations[].packets_dropped` | uint64 | Failed sends to this destination |
+| `destinations[].bytes_sent` | uint64 | Total bytes sent to this destination |
 | `destinations[].last_error` | string | Last error message (empty if healthy) |
 
 ---
@@ -177,15 +180,25 @@ sflow_enricher_bytes_forwarded_total 90000000
 # TYPE sflow_enricher_uptime_seconds gauge
 sflow_enricher_uptime_seconds 9015
 
-# HELP sflow_enricher_destination_packets_sent_total Packets sent to destination
-# TYPE sflow_enricher_destination_packets_sent_total counter
-sflow_enricher_destination_packets_sent_total{destination="primary-collector"} 125000
-sflow_enricher_destination_packets_sent_total{destination="secondary-collector"} 125000
+# HELP sflow_asn_enricher_destination_packets_sent_total Packets sent to destination
+# TYPE sflow_asn_enricher_destination_packets_sent_total counter
+sflow_asn_enricher_destination_packets_sent_total{destination="primary-collector"} 125000
+sflow_asn_enricher_destination_packets_sent_total{destination="secondary-collector"} 125000
 
-# HELP sflow_enricher_destination_healthy Destination health status
-# TYPE sflow_enricher_destination_healthy gauge
-sflow_enricher_destination_healthy{destination="primary-collector"} 1
-sflow_enricher_destination_healthy{destination="secondary-collector"} 1
+# HELP sflow_asn_enricher_destination_packets_dropped_total Packets dropped for destination
+# TYPE sflow_asn_enricher_destination_packets_dropped_total counter
+sflow_asn_enricher_destination_packets_dropped_total{destination="primary-collector"} 0
+sflow_asn_enricher_destination_packets_dropped_total{destination="secondary-collector"} 0
+
+# HELP sflow_asn_enricher_destination_bytes_sent_total Bytes sent to destination
+# TYPE sflow_asn_enricher_destination_bytes_sent_total counter
+sflow_asn_enricher_destination_bytes_sent_total{destination="primary-collector"} 45000000
+sflow_asn_enricher_destination_bytes_sent_total{destination="secondary-collector"} 45000000
+
+# HELP sflow_asn_enricher_destination_healthy Destination health status
+# TYPE sflow_asn_enricher_destination_healthy gauge
+sflow_asn_enricher_destination_healthy{destination="primary-collector"} 1
+sflow_asn_enricher_destination_healthy{destination="secondary-collector"} 1
 ```
 
 **Metrics:**
@@ -200,8 +213,10 @@ sflow_enricher_destination_healthy{destination="secondary-collector"} 1
 | `sflow_enricher_bytes_received_total` | counter | - | Bytes received |
 | `sflow_enricher_bytes_forwarded_total` | counter | - | Bytes forwarded |
 | `sflow_enricher_uptime_seconds` | gauge | - | Uptime in seconds |
-| `sflow_enricher_destination_packets_sent_total` | counter | `destination` | Per-destination packets |
-| `sflow_enricher_destination_healthy` | gauge | `destination` | 1=healthy, 0=unhealthy |
+| `sflow_asn_enricher_destination_packets_sent_total` | counter | `destination` | Per-destination packets sent |
+| `sflow_asn_enricher_destination_packets_dropped_total` | counter | `destination` | Per-destination packets dropped |
+| `sflow_asn_enricher_destination_bytes_sent_total` | counter | `destination` | Per-destination bytes sent |
+| `sflow_asn_enricher_destination_healthy` | gauge | `destination` | 1=healthy, 0=unhealthy |
 
 ---
 
@@ -244,7 +259,17 @@ rate(sflow_enricher_packets_dropped_total[1m])
 sflow_enricher_destination_healthy
 ```
 
-**Per-destination throughput:**
+**Per-destination throughput (pps):**
 ```promql
-rate(sflow_enricher_destination_packets_sent_total[1m])
+rate(sflow_asn_enricher_destination_packets_sent_total[1m])
+```
+
+**Per-destination throughput (bytes/s):**
+```promql
+rate(sflow_asn_enricher_destination_bytes_sent_total[1m])
+```
+
+**Per-destination drop rate:**
+```promql
+rate(sflow_asn_enricher_destination_packets_dropped_total[1m])
 ```

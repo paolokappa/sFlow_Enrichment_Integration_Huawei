@@ -1,8 +1,8 @@
 # RFC Compliance Certification
 
-## sFlow ASN Enricher v2.2.2
+## sFlow ASN Enricher v2.3.0
 
-**Date:** 2026-02-21
+**Date:** 2026-02-23
 **Auditor:** Paolo Caparrelli (GOLINE SA) with Claude Opus 4.6 (Anthropic)
 **Status:** COMPLIANT
 
@@ -149,6 +149,23 @@ struct extended_gateway {
 
 **Implementation (`sflow.go:ParseExtendedGateway()`):**
 
+**Address type enum (sFlow v5 spec):**
+```c
+enum address_type { UNKNOWN=0, IP_V4=1, IP_V6=2 };
+// UNKNOWN uses void (0 address bytes)
+```
+
+**UNKNOWN NextHop Offsets (NextHopType=0, v2.3.0 fix):**
+
+| Field | Spec Calculation | Code Offset | Status |
+|-------|-----------------|-------------|--------|
+| NextHopType | +0 | `recordData[0:4]` | COMPLIANT |
+| NextHop | void (0 bytes) | — | COMPLIANT |
+| AS (RouterAS) | +4 to +7 | `recordData[4:8]` | COMPLIANT |
+| SrcAS | +8 to +11 | `recordData[8:12]` | COMPLIANT |
+| SrcPeerAS | +12 to +15 | `recordData[12:16]` | COMPLIANT |
+| DstASPathLen | +16 to +19 | `recordData[16:20]` | COMPLIANT |
+
 **IPv4 NextHop Offsets (NextHopType=1):**
 
 | Field | Spec Calculation | Code Offset | Status |
@@ -170,6 +187,19 @@ struct extended_gateway {
 | SrcAS | +24 to +27 | `recordData[24:28]` | COMPLIANT |
 | SrcPeerAS | +28 to +31 | `recordData[28:32]` | COMPLIANT |
 | DstASPathLen | +32 to +35 | `recordData[32:36]` | COMPLIANT |
+
+**Offset calculation method (v2.3.0):** All 4 Modify* functions use `nextHopAddrSize()` helper:
+```go
+func nextHopAddrSize(addrType uint32) int {
+    switch addrType {
+    case 0: return 0   // UNKNOWN: void
+    case 1: return 4   // IPv4: 4 bytes
+    case 2: return 16  // IPv6: 16 bytes
+    default: return -1 // invalid
+    }
+}
+// Offset formula: type(4) + addr(addrSize) + field_offset
+```
 
 **AS Path Segment Parsing:**
 
@@ -405,12 +435,12 @@ The enricher never corrupts existing valid data. Modifications are strictly addi
 ### 7.2 Live Production Verification
 
 ```
-Service:     sflow-enricher v2.2.2
+Service:     sflow-enricher v2.3.0
 Uptime:      continuous operation since 2026-01-23
 Source:      Huawei NetEngine 8000 M14 (sFlow agent)
 
-packets_received:   338,695
-packets_enriched:   338,218
+packets_received:   338,695+
+packets_enriched:   338,218+
 packets_dropped:           0
 packets_filtered:          0
 enrichment_ratio:     99.86%
@@ -452,14 +482,16 @@ The parser design was cross-referenced with:
 
 ## Certification Statement
 
-This document certifies that **sFlow ASN Enricher v2.2.2** has been audited against the sFlow Version 5 specification (sflow.org/SFLOW-DATAGRAM5.txt), RFC 4506 (XDR External Data Representation Standard), and RFC 3176 (InMon Corporation's sFlow). All parsing, modification, and encoding operations conform to the requirements of these standards.
+This document certifies that **sFlow ASN Enricher v2.3.0** has been audited against the sFlow Version 5 specification (sflow.org/SFLOW-DATAGRAM5.txt), RFC 4506 (XDR External Data Representation Standard), and RFC 3176 (InMon Corporation's sFlow). All parsing, modification, and encoding operations conform to the requirements of these standards.
 
 The enrichment operations (SrcAS, SrcPeerAS, RouterAS, DstAS) modify only the intended fields within the Extended Gateway record (type 1003), preserve all other data, maintain XDR 4-byte alignment, and correctly update associated length fields when packet resize is required.
+
+v2.3.0 additionally handles the RFC-defined `address_type UNKNOWN (0)` with `void` (0 address bytes), using the `nextHopAddrSize()` helper for DRY offset calculation across all 4 Modify* functions.
 
 ---
 
 **Paolo Caparrelli** — GOLINE SA
 **Email:** soc@goline.ch
-**Date:** 2026-02-21
+**Date:** 2026-02-23
 
 **Co-Authored-By:** Claude Opus 4.6 (Anthropic)

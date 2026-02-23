@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="#"><img src="https://img.shields.io/badge/version-2.2.2-blue.svg" alt="Version"></a>
+  <a href="#"><img src="https://img.shields.io/badge/version-2.3.0-blue.svg" alt="Version"></a>
   <a href="#"><img src="https://img.shields.io/badge/Go-1.21+-00ADD8.svg" alt="Go"></a>
   <a href="#"><img src="https://img.shields.io/badge/sFlow-v5-orange.svg" alt="sFlow v5"></a>
   <a href="#"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License"></a>
@@ -90,7 +90,7 @@ Huawei NetEngine 8000 routers (and similar devices) present two issues when expo
 | **Prometheus Metrics** | `/metrics` endpoint for monitoring |
 | **HTTP Status API** | `/status` endpoint with JSON statistics |
 | **Health Endpoint** | `/health` for load balancer integration |
-| **Telegram Alerts** | Real-time notifications with IPv6/IPv4 fallback and rate limiting |
+| **Telegram Alerts** | Rich formatted notifications (6 types) with IPv6/IPv4 fallback and rate limiting |
 | **Structured Logging** | JSON or text format for ELK/Loki integration |
 | **Live Dashboard** | `sflow-monitor` ASCII dashboard with sparklines and flow diagram |
 
@@ -353,7 +353,7 @@ destinations:
 
 enrichment:
   rules:
-    - name: "my-network"
+    - name: "MY_NET"
       network: "10.0.0.0/8"
       match_as: 0
       set_as: 64512
@@ -386,13 +386,13 @@ destinations:
 
 enrichment:
   rules:
-    - name: "my-network-ipv4"
+    - name: "MY_NET_IPv4"
       network: "203.0.113.0/24"
       match_as: 0
       set_as: 64512
       overwrite: false
 
-    - name: "my-network-ipv6"
+    - name: "MY_NET_IPv6"
       network: "2001:db8::/32"
       match_as: 0
       set_as: 64512
@@ -485,8 +485,8 @@ sflow-monitor -no-color
 |---------|-------------|
 | **Packet/Byte rates** | Real-time pps and KB/s with sparkline graphs |
 | **Enrichment stats** | Percentage bars for enriched/dropped/filtered |
-| **Enrichment rules** | Table with Name, Network, SrcAS, DstAS, Condition |
-| **Flow diagram** | Visual source -> enricher -> destinations with addresses |
+| **Enrichment rules** | Table with Name, Network, SetAS, ExtGW Fields (Out/In) per rule |
+| **Flow diagram** | Tree layout source -> enricher -> destinations with rates and health |
 | **Destination table** | Health status, packets sent, drops, errors |
 | **Totals** | Cumulative counters with human-readable formatting |
 | **Dynamic sizing** | Frame auto-sizes to widest content at every refresh |
@@ -517,7 +517,7 @@ make build-static
 | [docs/MULTI_SAMPLE_FIX_RESEARCH.md](docs/MULTI_SAMPLE_FIX_RESEARCH.md) | Technical research on multi-sample handling |
 | [docs/SYSTEMD_INTEGRATION.md](docs/SYSTEMD_INTEGRATION.md) | Systemd notify and watchdog integration |
 | [docs/TELEGRAM_NOTIFICATIONS.md](docs/TELEGRAM_NOTIFICATIONS.md) | Telegram alerting configuration |
-| [docs/RFC_COMPLIANCE.md](docs/RFC_COMPLIANCE.md) | RFC compliance certification |
+| [docs/RFC_COMPLIANCE.md](docs/RFC_COMPLIANCE.md) | RFC compliance certification (v2.3.0) |
 | [CHANGELOG.md](CHANGELOG.md) | Version history and changes |
 
 ---
@@ -574,7 +574,9 @@ sflow-enricher/
 │   ├── OPERATIONS.md            # Operational guide
 │   ├── MULTI_SAMPLE_FIX_RESEARCH.md
 │   ├── SYSTEMD_INTEGRATION.md
-│   └── TELEGRAM_NOTIFICATIONS.md
+│   ├── TELEGRAM_NOTIFICATIONS.md
+│   ├── RFC_COMPLIANCE.md        # RFC compliance certification
+│   └── SOURCE_CODE_ANALYSIS.md  # Line-by-line code analysis
 ├── systemd/
 │   └── sflow-enricher.service
 ├── config.yaml                  # Example configuration
@@ -609,5 +611,5 @@ sflow-enricher/
 </p>
 
 <p align="center">
-  <strong>Version 2.2.2</strong> • February 2026
+  <strong>Version 2.3.0</strong> • February 2026
 </p>

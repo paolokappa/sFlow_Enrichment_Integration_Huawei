@@ -106,8 +106,8 @@ sflow-monitor -version
 | **Packet Flow** | In/Out/Drop rates (pps) with sparkline graphs |
 | **Bytes Flow** | In/Out rates (KB/s) with sparkline graphs |
 | **Enrichment** | Enriched/No ExtGW/Filtered/Dropped percentage bars |
-| **Enrichment Rules** | Table with Name, Network, SetAS, Modifies (SrcAS + SrcPeerAS + DstAS + RouterAS) |
-| **Flow Diagram** | Visual [Source] -> [Enricher] -> [Destinations] with addresses |
+| **Enrichment Rules** | Table with Name, Network, SetAS, ExtGW Fields (Out: SrcAS,SrcPeerAS,RouterAS / In: DstAS,RouterAS) per rule |
+| **Flow Diagram** | Tree layout [Source] -> [Enricher] with ├─/└─ branches to [Destinations] with rates and health |
 | **Destinations** | Table with health, packets sent, drops, errors |
 | **Totals** | Cumulative received/forwarded/enriched/dropped/bytes |
 

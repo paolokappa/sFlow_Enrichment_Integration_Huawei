@@ -24,7 +24,7 @@ import (
 const (
 	maxPacketSize = 65535
 	bufferPoolSize = 1000
-	version = "2.2.2"
+	version = "2.3.0"
 )
 
 // Stats holds packet statistics
@@ -236,16 +236,24 @@ func main() {
 	startWatchdog()
 
 	// Send startup notification
-	startupDetails := fmt.Sprintf("Service started on `%s`\n📦 Version: `%s`\n📋 Rules:",
-		cfg.ListenAddr(), version)
+	startupMsg := fmt.Sprintf("📡 *Listen:* `%s`\n", cfg.ListenAddr())
+	startupMsg += "\n📋 *Enrichment Rules — Extended Gateway (1003):*"
 	for _, rule := range cfg.Enrichment.Rules {
-		startupDetails += fmt.Sprintf("\n   • `%s` → AS%d", rule.Name, rule.SetAS)
+		startupMsg += fmt.Sprintf("\n   • `%s` → AS%d (%s)", rule.Name, rule.SetAS, rule.Network)
 	}
-	startupDetails += "\n🎯 Destinations:"
+	startupMsg += "\n   _Out(srcIP): SrcAS, SrcPeerAS, RouterAS_"
+	startupMsg += "\n   _In(dstIP): DstAS, RouterAS_"
+	startupMsg += "\n"
+	startupMsg += "\n🎯 *Destinations:*"
 	for _, dest := range destinations {
-		startupDetails += fmt.Sprintf("\n   • `%s` (%s)", dest.Config.Name, dest.Stats.Address)
+		startupMsg += fmt.Sprintf("\n   • `%s` (%s)", dest.Config.Name, dest.Stats.Address)
 	}
-	sendTelegramAlert("startup", startupDetails)
+	startupMsg += "\n"
+	startupMsg += "\n🖧 *sFlow Sources:*"
+	for _, src := range cfg.Security.WhitelistSources {
+		startupMsg += fmt.Sprintf("\n   • `%s`", src)
+	}
+	sendTelegramAlert("startup", startupMsg)
 
 	// Handle signals
 	sigChan := make(chan os.Signal, 1)
@@ -279,30 +287,36 @@ func main() {
 			logInfo("Received shutdown signal", map[string]interface{}{"signal": sig.String()})
 
 			// Build detailed shutdown message
-			destStats := ""
+			recv := atomic.LoadUint64(&stats.PacketsReceived)
+			enriched := atomic.LoadUint64(&stats.PacketsEnriched)
+			dropped := atomic.LoadUint64(&stats.PacketsDropped)
+			enrichPct := float64(0)
+			if recv > 0 {
+				enrichPct = float64(enriched) / float64(recv) * 100
+			}
+
+			shutdownMsg := fmt.Sprintf("⏱️ *Uptime:* `%s`", time.Since(stats.StartTime).Round(time.Second))
+			shutdownMsg += "\n"
+			shutdownMsg += "\n📊 *Stats:*"
+			shutdownMsg += fmt.Sprintf("\n   📥 Received: `%d`", recv)
+			shutdownMsg += fmt.Sprintf("\n   ✅ Enriched: `%d` (%.1f%%)", enriched, enrichPct)
+			shutdownMsg += fmt.Sprintf("\n   📤 Forwarded: `%d`", atomic.LoadUint64(&stats.PacketsForwarded))
+			shutdownMsg += fmt.Sprintf("\n   ❌ Dropped: `%d`", dropped)
+			shutdownMsg += "\n"
+			shutdownMsg += "\n🎯 *Destinations:*"
 			for _, dest := range destinations {
 				statusIcon := "✅"
 				if !dest.Healthy.Load() {
 					statusIcon = "❌"
 				}
-				destStats += fmt.Sprintf("\n   %s `%s`: %d pkts", statusIcon, dest.Config.Name,
-					atomic.LoadUint64(&dest.Stats.PacketsSent))
+				shutdownMsg += fmt.Sprintf("\n   %s `%s`: %d pkts, %s",
+					statusIcon, dest.Config.Name,
+					atomic.LoadUint64(&dest.Stats.PacketsSent),
+					formatBytesCompact(atomic.LoadUint64(&dest.Stats.BytesSent)))
 			}
 
-			shutdownDetails := fmt.Sprintf("Service shutting down\n"+
-				"⏱️ Uptime: `%s`\n"+
-				"📥 Received: `%d`\n"+
-				"✅ Enriched: `%d`\n"+
-				"❌ Dropped: `%d`\n"+
-				"🎯 Destinations:%s",
-				time.Since(stats.StartTime).Round(time.Second),
-				atomic.LoadUint64(&stats.PacketsReceived),
-				atomic.LoadUint64(&stats.PacketsEnriched),
-				atomic.LoadUint64(&stats.PacketsDropped),
-				destStats)
-
 			// Blocking call to ensure Telegram notification is sent before shutdown
-			sendTelegramAlertWithWait("shutdown", shutdownDetails, true)
+			sendTelegramAlertWithWait("shutdown", shutdownMsg, true)
 			close(stopChan)
 			listener.Close()
 			for _, dest := range destinations {
@@ -663,8 +677,14 @@ func checkDestinationHealth(dest *Destination) {
 			logError("Destination unhealthy", err, map[string]interface{}{
 				"destination": dest.Config.Name,
 			})
-			sendRateLimitedAlert("destination_down", dest.Config.Name,
-				fmt.Sprintf("Destination `%s` is *DOWN*: %v", dest.Config.Name, err))
+			downMsg := fmt.Sprintf("🎯 *Destination:* `%s` (`%s`)\n"+
+				"❌ *Status:* DOWN\n"+
+				"\n💥 *Error:* `%s`\n"+
+				"\n📊 *Sent before failure:* %d pkts",
+				dest.Config.Name, dest.Stats.Address,
+				err.Error(),
+				atomic.LoadUint64(&dest.Stats.PacketsSent))
+			sendRateLimitedAlert("destination_down", dest.Config.Name, downMsg)
 		}
 	} else {
 		conn.Close()
@@ -679,8 +699,11 @@ func checkDestinationHealth(dest *Destination) {
 			logInfo("Destination healthy", map[string]interface{}{
 				"destination": dest.Config.Name,
 			})
-			sendRateLimitedAlert("destination_up", dest.Config.Name,
-				fmt.Sprintf("Destination `%s` is *UP*", dest.Config.Name))
+			upMsg := fmt.Sprintf("🎯 *Destination:* `%s` (`%s`)\n"+
+				"✅ *Status:* UP\n"+
+				"\n🔄 Recovered",
+				dest.Config.Name, dest.Stats.Address)
+			sendRateLimitedAlert("destination_up", dest.Config.Name, upMsg)
 		}
 	}
 }
@@ -734,15 +757,31 @@ func prometheusMetricsHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "sflow_asn_enricher_uptime_seconds %.0f\n", time.Since(stats.StartTime).Seconds())
 
 	// Per-destination metrics
+	fmt.Fprintf(w, "# HELP sflow_asn_enricher_destination_packets_sent_total Packets sent to destination\n")
+	fmt.Fprintf(w, "# TYPE sflow_asn_enricher_destination_packets_sent_total counter\n")
 	for _, dest := range destinations {
 		labels := fmt.Sprintf(`destination="%s"`, dest.Config.Name)
-
-		fmt.Fprintf(w, "# HELP sflow_asn_enricher_destination_packets_sent_total Packets sent to destination\n")
-		fmt.Fprintf(w, "# TYPE sflow_asn_enricher_destination_packets_sent_total counter\n")
 		fmt.Fprintf(w, "sflow_asn_enricher_destination_packets_sent_total{%s} %d\n", labels, atomic.LoadUint64(&dest.Stats.PacketsSent))
+	}
 
-		fmt.Fprintf(w, "# HELP sflow_asn_enricher_destination_healthy Destination health status\n")
-		fmt.Fprintf(w, "# TYPE sflow_asn_enricher_destination_healthy gauge\n")
+	fmt.Fprintf(w, "# HELP sflow_asn_enricher_destination_packets_dropped_total Packets dropped for destination\n")
+	fmt.Fprintf(w, "# TYPE sflow_asn_enricher_destination_packets_dropped_total counter\n")
+	for _, dest := range destinations {
+		labels := fmt.Sprintf(`destination="%s"`, dest.Config.Name)
+		fmt.Fprintf(w, "sflow_asn_enricher_destination_packets_dropped_total{%s} %d\n", labels, atomic.LoadUint64(&dest.Stats.PacketsDropped))
+	}
+
+	fmt.Fprintf(w, "# HELP sflow_asn_enricher_destination_bytes_sent_total Bytes sent to destination\n")
+	fmt.Fprintf(w, "# TYPE sflow_asn_enricher_destination_bytes_sent_total counter\n")
+	for _, dest := range destinations {
+		labels := fmt.Sprintf(`destination="%s"`, dest.Config.Name)
+		fmt.Fprintf(w, "sflow_asn_enricher_destination_bytes_sent_total{%s} %d\n", labels, atomic.LoadUint64(&dest.Stats.BytesSent))
+	}
+
+	fmt.Fprintf(w, "# HELP sflow_asn_enricher_destination_healthy Destination health status\n")
+	fmt.Fprintf(w, "# TYPE sflow_asn_enricher_destination_healthy gauge\n")
+	for _, dest := range destinations {
+		labels := fmt.Sprintf(`destination="%s"`, dest.Config.Name)
 		healthy := 0
 		if dest.Healthy.Load() {
 			healthy = 1
@@ -789,12 +828,13 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 	for _, dest := range destinations {
 		dest.mu.RLock()
 		destStatus := map[string]interface{}{
-			"name":           dest.Stats.Name,
-			"address":        dest.Stats.Address,
-			"healthy":        dest.Healthy.Load(),
-			"packets_sent":   atomic.LoadUint64(&dest.Stats.PacketsSent),
+			"name":            dest.Stats.Name,
+			"address":         dest.Stats.Address,
+			"healthy":         dest.Healthy.Load(),
+			"packets_sent":    atomic.LoadUint64(&dest.Stats.PacketsSent),
 			"packets_dropped": atomic.LoadUint64(&dest.Stats.PacketsDropped),
-			"last_error":     dest.Stats.LastError,
+			"bytes_sent":      atomic.LoadUint64(&dest.Stats.BytesSent),
+			"last_error":      dest.Stats.LastError,
 		}
 		dest.mu.RUnlock()
 		destList = append(destList, destStatus)
@@ -883,13 +923,13 @@ func ipv6FallbackDialer(ctx context.Context, network, addr string) (net.Conn, er
 func sendIPv6DegradationAlert() {
 	hostname, _ := os.Hostname()
 	msg := fmt.Sprintf(
-		"⚠️ *sFlow ASN Enricher*\n"+
-			"━━━━━━━━━━━━━━━━━━━━━\n"+
+		"⚠️ *sFlow ASN Enricher* `v%s`\n"+
+			"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"+
 			"📍 *Host:* `%s`\n"+
 			"🏷️ *Event:* `ipv6_degraded`\n"+
-			"💬 *Details:* IPv6 connectivity to Telegram API failed, using IPv4 fallback\n"+
-			"🕐 *Time:* `%s`",
-		hostname, time.Now().Format("02/01/2006 15:04:05"))
+			"\n💬 IPv6 connectivity to Telegram API failed, using IPv4 fallback\n"+
+			"\n🕐 *Time:* `%s`",
+		version, hostname, time.Now().Format("02/01/2006 15:04:05"))
 
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", cfg.Telegram.BotToken)
 	payload := map[string]interface{}{
@@ -981,13 +1021,13 @@ func sendTelegramAlertWithWait(alertType, message string, blocking bool) {
 
 		// Message format with European date DD/MM/YYYY
 		fullMessage := fmt.Sprintf(
-			"%s *sFlow ASN Enricher*\n"+
-				"━━━━━━━━━━━━━━━━━━━━━\n"+
+			"%s *sFlow ASN Enricher* `v%s`\n"+
+				"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"+
 				"📍 *Host:* `%s`\n"+
 				"🏷️ *Event:* `%s`\n"+
-				"💬 *Details:* %s\n"+
-				"🕐 *Time:* `%s`",
-			icon, hostname, alertType, message,
+				"%s\n"+
+				"\n🕐 *Time:* `%s`",
+			icon, version, hostname, alertType, message,
 			time.Now().Format("02/01/2006 15:04:05"))
 
 		apiURL := fmt.Sprintf(
@@ -1133,14 +1173,27 @@ func checkDropRate() {
 			"dropped":   deltaDropped,
 		})
 
-		msg := fmt.Sprintf("Drop rate `%.1f%%` exceeds threshold `%.1f%%`\n"+
-			"📊 Interval: `%d` received, `%d` dropped\n"+
-			"📈 Total: `%d` received, `%d` dropped",
+		msg := fmt.Sprintf("⚠️ *Drop rate:* `%.1f%%` (threshold: `%.1f%%`)\n"+
+			"\n📊 *Interval:* `%d` received, `%d` dropped\n"+
+			"\n📈 *Totals:* `%d` received, `%d` dropped",
 			dropRate, cfg.Telegram.DropRateThreshold,
 			deltaReceived, deltaDropped,
 			curReceived, curDropped)
 
 		sendRateLimitedAlert("high_drop_rate", "global", msg)
+	}
+}
+
+func formatBytesCompact(b uint64) string {
+	switch {
+	case b >= 1_000_000_000:
+		return fmt.Sprintf("%.1f GB", float64(b)/1_000_000_000)
+	case b >= 1_000_000:
+		return fmt.Sprintf("%.1f MB", float64(b)/1_000_000)
+	case b >= 1_000:
+		return fmt.Sprintf("%.1f KB", float64(b)/1_000)
+	default:
+		return fmt.Sprintf("%d B", b)
 	}
 }
 

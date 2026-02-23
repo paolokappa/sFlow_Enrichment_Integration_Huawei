@@ -2,6 +2,48 @@
 
 All notable changes to the sFlow ASN Enricher project.
 
+## [2.3.0] - 2026-02-23
+
+### Fixed
+- **RFC compliance: NextHop address_type UNKNOWN (0)**: The sFlow v5 specification defines `enum address_type { UNKNOWN=0, IP_V4=1, IP_V6=2 }` where UNKNOWN uses `void` (0 address bytes). The enricher only handled IPv4 and IPv6, returning error for type=0 and skipping the entire extended_gateway record. Now correctly handles all three RFC-defined address types
+- **ParseExtendedGateway minimum size**: Reduced from 20 to 16 bytes to accommodate UNKNOWN nexthop (type(4) + void(0) + AS(4) + SrcAS(4) + SrcPeerAS(4) = 16)
+- **Per-type bounds checks**: Added explicit bounds validation for IPv4/IPv6 nexthop address reading instead of relying on a single upfront size check
+- **Prometheus /metrics duplicate HELP/TYPE**: Per-destination HELP/TYPE comments were emitted inside the loop, producing duplicates with 2+ destinations. Now emitted once per metric family (Prometheus exposition format compliant)
+- **sflow-monitor uint64 underflow**: Rate calculations and `noGw` counter could wrap on uint64 underflow if enricher restarted between polls. Added `safeDelta()` helper and sum-first guard
+
+### Added
+- **AddressTypeUnknown constant**: `AddressTypeUnknown = 0` added to sFlow v5 address type constants
+- **nextHopAddrSize() helper**: Centralized DRY function returning address size per type (UNKNOWN=0, IPv4=4, IPv6=16), replacing duplicated switch statements in all 4 Modify* functions
+- **Prometheus per-destination packets_dropped and bytes_sent**: New counter metrics `sflow_asn_enricher_destination_packets_dropped_total` and `sflow_asn_enricher_destination_bytes_sent_total` per destination label
+- **API /status bytes_sent per destination**: `bytes_sent` field added to each destination in the JSON response
+- **sflow-monitor Filtered total**: TOTALS section now shows Filtered count when > 0
+- **Telegram message redesign**: All 6 alert types completely redesigned with rich formatting:
+  - **startup**: Version in title, Listen address, Enrichment Rules with Extended Gateway (1003) details (Out/In fields), Destinations list, sFlow Sources list
+  - **shutdown**: Uptime, Stats section (received/enriched %/forwarded/dropped), Destinations with per-dest packets and bytes
+  - **destination_down**: Destination name + address, DOWN status, error detail, packets sent before failure
+  - **destination_up**: Destination name + address, UP status, recovered indicator
+  - **high_drop_rate**: Drop rate vs threshold, interval stats, cumulative totals
+  - **ipv6_degraded**: Version in title (aligned with main template), IPv6 fallback detail
+- **Telegram uniform spacing**: All message types have consistent empty line separators between sections
+- **formatBytesCompact() helper**: Human-readable byte formatting (B/KB/MB/GB) for Telegram shutdown stats
+
+### Changed
+- **ModifySrcAS, ModifyRouterAS, ModifySrcPeerAS, ModifyDstAS**: All use `nextHopAddrSize()` with formula-based offset calculation (`type(4) + addr(addrSize) + field_offset`) instead of hardcoded per-type offsets
+- **sflow-monitor version**: Updated from hardcoded `1.0.0` to `2.3.0`
+- **sflow-monitor ENRICHMENT RULES**: Redesigned with Extended Gateway (1003) in title, per-rule ExtGW field details (Out/In), clean single-line format
+- **sflow-monitor FLOW DIAGRAM**: Redesigned with tree layout (├─/└─ branches) for clean multi-destination display
+- **Telegram template**: Version displayed in title (`*sFlow ASN Enricher* v2.3.0`), removed generic "Details:" prefix, each alert type has its own structured body
+- **Telegram "Whitelist"**: Renamed to "sFlow Sources" with individual IP listing instead of count
+
+### Offset verification (all 3 address types)
+
+| Field | UNKNOWN(0) | IPv4(1) | IPv6(2) |
+|-------|-----------|---------|---------|
+| RouterAS | +4 | +8 | +20 |
+| SrcAS | +8 | +12 | +24 |
+| SrcPeerAS | +12 | +16 | +28 |
+| DstASPathLen | +16 | +20 | +32 |
+
 ## [2.2.2] - 2026-02-21
 
 ### Fixed
